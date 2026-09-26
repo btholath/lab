@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How Kubernetes Works — The Harbor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy-deep: #0b1f33;
+    --navy-mid: #12314f;
+    --navy-light: #1c4368;
+    --amber: #f2a44b;
+    --amber-dim: #c9843a;
+    --green: #4fd48a;
+    --red: #ef6f6f;
+    --ink: #eef2f6;
+    --ink-dim: #a9bdd1;
+    --card-bg: #0e2740;
+    --font-head: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+    --font-body: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --navy-deep: #0b1f33;
+    }
+  }
+  :root[data-theme="dark"] { --navy-deep: #0b1f33; }
+
+  body {
+    margin: 0;
+    background: linear-gradient(180deg, var(--navy-deep) 0%, #08182a 100%);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 5rem;
+  }
+
+  header.hero {
+    text-align: left;
+    margin-bottom: 2.25rem;
+  }
+  header.hero .eyebrow {
+    color: var(--amber);
+    font-family: var(--font-head);
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0 0 0.4rem;
+  }
+  header.hero h1 {
+    font-family: var(--font-head);
+    font-weight: 700;
+    font-size: clamp(2rem, 4.5vw, 3.1rem);
+    line-height: 1.08;
+    margin: 0 0 0.9rem;
+    max-width: 18ch;
+  }
+  header.hero p {
+    color: var(--ink-dim);
+    font-size: 1.08rem;
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  /* ---------- Stage ---------- */
+  .stage-frame {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1000 / 620;
+    background: linear-gradient(180deg, #133a5c 0%, #0e2c47 55%, #0a2038 100%);
+    border-radius: 18px;
+    border: 1px solid #204a70;
+    overflow: hidden;
+    margin: 2.5rem 0 1rem;
+    box-shadow: 0 30px 60px -25px rgba(0,0,0,0.6);
+  }
+  .stage {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  svg.lines {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .node {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  .label-tag {
+    font-family: var(--font-head);
+    font-weight: 600;
+    font-size: clamp(0.62rem, 1.05vw, 0.85rem);
+    color: var(--ink);
+    letter-spacing: 0.01em;
+    margin-top: 0.4rem;
+    white-space: nowrap;
+  }
+  .sub-tag {
+    font-size: clamp(0.5rem, 0.8vw, 0.66rem);
+    color: var(--ink-dim);
+    margin-top: 0.1rem;
+    white-space: nowrap;
+  }
+
+  /* You / captain */
+  .you-icon {
+    width: clamp(38px, 6vw, 58px);
+    height: clamp(38px, 6vw, 58px);
+    border-radius: 50%;
+    background: var(--navy-light);
+    border: 2px solid var(--amber);
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(1rem, 2vw, 1.4rem);
+  }
+
+  .order-bubble {
+    position: absolute;
+    background: #0f2f4c;
+    border: 1px solid var(--amber-dim);
+    color: var(--amber);
+    font-family: 'Space Mono', monospace;
+    font-size: clamp(0.5rem, 0.85vw, 0.68rem);
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    white-space: nowrap;
+    opacity: 0;
+  }
+
+  /* control tower */
+  .tower {
+    width: clamp(150px, 22vw, 210px);
+    padding: 0.6rem;
+    background: var(--card-bg);
+    border: 1px solid #26588a;
+    border-radius: 12px;
+  }
+  .tower-title {
+    font-family: var(--font-head);
+    font-weight: 700;
+    font-size: clamp(0.68rem, 1.1vw, 0.88rem);
+    margin-bottom: 0.5rem;
+  }
+  .module-row {
+    display: flex;
+    gap: 0.35rem;
+    justify-content: center;
+  }
+  .module {
+    flex: 1;
+    background: var(--navy-mid);
+    border: 1px solid #2c5f92;
+    border-radius: 7px;
+    padding: 0.35rem 0.2rem;
+    font-size: clamp(0.46rem, 0.75vw, 0.6rem);
+    color: var(--ink-dim);
+    position: relative;
+  }
+  .module .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #3a6f9f;
+    margin: 0 auto 0.2rem;
+  }
+  .module.pulse .dot { animation: modPulse 8s ease-in-out infinite; }
+  .module.pulse-2 .dot { animation-delay: .3s; }
+  .module.pulse-3 .dot { animation-delay: .6s; }
+
+  /* ship / worker node */
+  .ship {
+    width: clamp(300px, 46vw, 430px);
+    background: var(--card-bg);
+    border: 1px solid #26588a;
+    border-radius: 14px;
+    padding: 0.7rem 0.8rem 0.9rem;
+  }
+  .ship-title {
+    font-family: var(--font-head);
+    font-weight: 700;
+    font-size: clamp(0.7rem, 1.2vw, 0.95rem);
+    margin-bottom: 0.15rem;
+  }
+  .ship-sub {
+    font-size: clamp(0.5rem, 0.8vw, 0.64rem);
+    color: var(--ink-dim);
+    margin-bottom: 0.55rem;
+  }
+  .deck {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    position: relative;
+    padding: 0.3rem;
+  }
+  .crate {
+    width: clamp(48px, 8vw, 70px);
+    height: clamp(38px, 6vw, 52px);
+    background: linear-gradient(160deg, #2c6da1, #1c4c78);
+    border: 1px solid #3f83bb;
+    border-radius: 6px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: clamp(0.44rem, 0.7vw, 0.58rem);
+    font-family: var(--font-head);
+    font-weight: 600;
+    color: var(--ink);
+    position: relative;
+  }
+  .crate .status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    margin-bottom: 2px;
+    animation: heartbeat 2.2s ease-in-out infinite;
+  }
+  .crate.ghost {
+    animation: crashRespawn 8s steps(1,end) infinite;
+  }
+  .crate.ghost .status-dot {
+    animation: heartbeat 2.2s ease-in-out infinite, ghostDot 8s steps(1,end) infinite;
+  }
+
+  .crane {
+    position: absolute;
+    width: clamp(2px, 0.3vw, 3px);
+    background: var(--amber-dim);
+    animation: craneSwing 8s ease-in-out infinite;
+    transform-origin: top center;
+  }
+
+  /* traveling order dot */
+  .traveler {
+    position: absolute;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 10px 2px rgba(242,164,75,0.7);
+    offset-rotate: 0deg;
+    animation: travelPath 8s linear infinite;
+  }
+
+  /* curl / direct access arrow */
+  .curl-flow {
+    position: absolute;
+    font-family: 'Space Mono', monospace;
+    font-size: clamp(0.5rem, 0.85vw, 0.7rem);
+    color: var(--green);
+    opacity: 0;
+    animation: curlFade 8s ease-in-out infinite;
+  }
+
+  .legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 0.9rem;
+    margin-top: 2.5rem;
+  }
+  .legend-card {
+    background: var(--card-bg);
+    border: 1px solid #204a70;
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+  }
+  .legend-card .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    margin-right: 0.5rem;
+  }
+  .legend-card h3 {
+    font-family: var(--font-head);
+    font-size: 0.95rem;
+    margin: 0 0 0.35rem;
+    display: flex;
+    align-items: center;
+  }
+  .legend-card p {
+    margin: 0;
+    color: var(--ink-dim);
+    font-size: 0.86rem;
+  }
+
+  footer {
+    margin-top: 3rem;
+    color: var(--ink-dim);
+    font-size: 0.85rem;
+    border-top: 1px solid #1c3d5c;
+    padding-top: 1.2rem;
+  }
+
+  /* ---------------- Keyframes ---------------- */
+  @keyframes heartbeat {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.35); opacity: 0.7; }
+  }
+  @keyframes modPulse {
+    0%, 80%, 100% { background: #3a6f9f; box-shadow: none; }
+    5%, 15% { background: var(--amber); box-shadow: 0 0 8px 2px rgba(242,164,75,0.8); }
+  }
+  @keyframes craneSwing {
+    0%, 15% { transform: rotate(0deg); }
+    30%, 45% { transform: rotate(-14deg); }
+    60% { transform: rotate(0deg); }
+    100% { transform: rotate(0deg); }
+  }
+  @keyframes crashRespawn {
+    0%, 55% { opacity: 1; filter: none; }
+    58% { opacity: 0.15; filter: grayscale(1); }
+    62%, 78% { opacity: 0; }
+    80% { opacity: 0.4; filter: grayscale(0.6); }
+    85%, 100% { opacity: 1; filter: none; }
+  }
+  @keyframes ghostDot {
+    0%, 55% { background: var(--green); }
+    58%, 78% { background: #555; }
+    80%, 100% { background: var(--green); }
+  }
+  @keyframes curlFade {
+    0%, 65% { opacity: 0; transform: translateY(4px); }
+    70%, 88% { opacity: 1; transform: translateY(0); }
+    95%, 100% { opacity: 0; transform: translateY(-4px); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; }
+    .traveler { opacity: 0; }
+  }
+
+  @media (max-width: 640px) {
+    .stage-frame { aspect-ratio: 620 / 620; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">A plain-language map of the cluster we built</p>
+    <h1>How Kubernetes actually works</h1>
+    <p>Think of it as a busy harbor. You place an order, a control tower
+    figures out the details, and a ship loads and runs your cargo — while
+    quietly fixing anything that falls overboard. Watch the loop below, then
+    read the explanation underneath.</p>
+  </header>
+
+  <div class="stage-frame">
+    <div class="stage" id="stage">
+
+      <!-- connecting lines -->
+      <svg class="lines" viewBox="0 0 1000 620" preserveAspectRatio="none">
+        <path d="M 95 170 L 260 170" stroke="#2c5f92" stroke-width="2" fill="none" stroke-dasharray="4 5"/>
+        <path d="M 420 170 L 590 170" stroke="#2c5f92" stroke-width="2" fill="none" stroke-dasharray="4 5"/>
+        <path d="M 95 220 L 95 430" stroke="#2c5f92" stroke-width="2" fill="none" stroke-dasharray="4 5"/>
+        <path d="M 95 430 L 640 500" stroke="#2c5f92" stroke-width="2" fill="none" stroke-dasharray="4 5"/>
+        <!-- network mesh between crates, drawn via JS-free static lines -->
+        <path d="M 660 300 L 760 300" stroke="var(--amber-dim)" stroke-width="1.5" fill="none" stroke-dasharray="3 4"/>
+        <path d="M 660 300 L 710 340" stroke="var(--amber-dim)" stroke-width="1.5" fill="none" stroke-dasharray="3 4"/>
+        <path d="M 760 300 L 810 340" stroke="var(--amber-dim)" stroke-width="1.5" fill="none" stroke-dasharray="3 4"/>
+      </svg>
+
+      <!-- Traveling order dot: developer -> control plane -> ship -->
+      <div class="traveler" style="offset-path: path('M 60 175 L 330 175 L 330 175 L 700 175 L 700 260'); "></div>
+
+      <!-- YOU / developer -->
+      <div class="node" style="left: 2%; top: 22%;">
+        <div class="you-icon">🧑‍💻</div>
+        <div class="label-tag">You</div>
+        <div class="sub-tag">kubectl apply -f app.yaml</div>
+      </div>
+      <div class="order-bubble" style="left: 3%; top: 8%; animation: curlFade 8s ease-in-out infinite; animation-delay: 0s;">
+        "I want 3 httpd pods"
+      </div>
+
+      <!-- Control tower -->
+      <div class="node tower" style="left: 26%; top: 12%;">
+        <div class="tower-title">🗼 Control Tower</div>
+        <div class="module-row">
+          <div class="module pulse">
+            <div class="dot"></div>API&nbsp;Server
+          </div>
+          <div class="module pulse pulse-2">
+            <div class="dot"></div>etcd
+          </div>
+          <div class="module pulse pulse-3">
+            <div class="dot"></div>Scheduler
+          </div>
+        </div>
+        <div class="sub-tag" style="margin-top:0.5rem;">The Control Plane — decides &amp; remembers</div>
+      </div>
+
+      <!-- Ship / worker node -->
+      <div class="node ship" style="left: 60%; top: 8%;">
+        <div class="ship-title">🚢 The Ship</div>
+        <div class="ship-sub">Worker Node — run by kubelet &amp; containerd</div>
+        <div class="deck">
+          <div class="crate"><div class="status-dot"></div>nginx</div>
+          <div class="crate"><div class="status-dot"></div>httpd</div>
+          <div class="crate"><div class="status-dot"></div>test-1</div>
+          <div class="crate ghost"><div class="status-dot"></div>test-2</div>
+          <div class="crate"><div class="status-dot"></div>test-3</div>
+        </div>
+        <div class="sub-tag" style="margin-top:0.5rem;">🔗 Calico network — every crate gets its own real address</div>
+      </div>
+
+      <!-- curl direct line -->
+      <div class="curl-flow" style="left: 4%; top: 62%;">
+        $ curl 192.168.78.75<br>→ "It works!"
+      </div>
+      <div class="node" style="left: 2%; top: 78%;">
+        <div class="you-icon" style="border-color:var(--green);">🌐</div>
+        <div class="label-tag">Anyone on the network</div>
+        <div class="sub-tag">can reach a pod's real IP directly</div>
+      </div>
+
+      <!-- self heal caption -->
+      <div class="node" style="left: 62%; top: 70%;">
+        <div class="sub-tag" style="color:var(--amber); font-weight:600;">
+          ⚠ test-2 crashed → kubelet notices → a fresh one is started automatically
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-card">
+      <h3><span class="swatch" style="background:var(--amber);"></span>You (kubectl)</h3>
+      <p>You describe what you want — "3 copies of this app" — in a YAML
+      file, and send it to the cluster. You never say <em>how</em> to do it,
+      only <em>what</em> the end result should look like.</p>
+    </div>
+    <div class="legend-card">
+      <h3><span class="swatch" style="background:#3a6f9f;"></span>Control Tower (Control Plane)</h3>
+      <p>The brain of the cluster. The <strong>API Server</strong> receives
+      your request, <strong>etcd</strong> remembers it, and the
+      <strong>Scheduler</strong> decides which ship has room to run it.</p>
+    </div>
+    <div class="legend-card">
+      <h3><span class="swatch" style="background:#2c6da1;"></span>The Ship (Worker Node)</h3>
+      <p>A real machine that actually runs your app. <strong>kubelet</strong>
+      is the dockworker following the tower's orders, and
+      <strong>containerd</strong> is what actually starts each container.</p>
+    </div>
+    <div class="legend-card">
+      <h3><span class="swatch" style="background:var(--green);"></span>Crates (Pods)</h3>
+      <p>Each crate is one running copy of your app — a <strong>Pod</strong>.
+      Every crate gets its own real network address, so it can be reached
+      directly, and can talk to its neighbors.</p>
+    </div>
+    <div class="legend-card">
+      <h3><span class="swatch" style="background:var(--amber-dim);"></span>The Roads (Calico / CNI)</h3>
+      <p>The dashed lines connecting crates are the cluster's network layer.
+      It gives every pod a real, routable address — no extra setup needed
+      for one crate to reach another.</p>
+    </div>
+    <div class="legend-card">
+      <h3><span class="swatch" style="background:var(--red);"></span>Self-Healing</h3>
+      <p>If a crate falls overboard (a container crashes), kubelet notices
+      the ship no longer matches the tower's order and quietly loads a
+      replacement — without anyone having to ask.</p>
+    </div>
+  </div>
+
+  <footer>
+    Companion explanation: see <code>kubernetes-explained-for-everyone.md</code>
+    in this repo for the full plain-language write-up.
+  </footer>
+
+</div>
+</body>
+</html>
