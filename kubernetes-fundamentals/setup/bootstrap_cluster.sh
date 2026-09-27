@@ -11,6 +11,10 @@
 #   - Auto-detects and self-heals the known CNI startup race
 #     (pods that landed on a stale/competing CNI network before
 #     Calico's own config was in place)
+#   - Auto-detects and self-heals a stale calico-node CNI token
+#     (causes stuck ContainerCreating on create AND stuck Terminating
+#     on delete after the node has been running a long time — see
+#     Lab 4 in kubernetes-fundamentals for the full incident writeup)
 # ==========================================
 
 set -e
@@ -27,7 +31,7 @@ POD_CIDR="192.168.0.0/16"
 POD_CIDR_PREFIX="192.168."   # used to detect pods that landed on the WRONG network
 
 STEP=0
-TOTAL_STEPS=7
+TOTAL_STEPS=8
 
 step() { STEP=$((STEP+1)); echo -e "\n${BLUE}[STEP ${STEP}/${TOTAL_STEPS}] $1${NC}"; }
 ok()   { echo -e "  ${GREEN}[OK]${NC}   $1"; }
@@ -191,6 +195,49 @@ else
   doing "waiting 30s for rescheduled pods to come up"
   sleep 30
   fixed "rescheduled mis-networked pods (re-run this script if any are still not Ready)"
+fi
+
+# ------------------------------------------------------------------
+step "Self-heal: detect and fix a stale Calico CNI token (Unauthorized errors)"
+# ------------------------------------------------------------------
+# Known recurring issue on long-lived nodes: calico-node's "install-cni" init
+# container writes a ONE-TIME snapshot of a service account token to
+# /etc/cni/net.d/calico-kubeconfig when the pod starts. Unlike a token
+# mounted into a running pod (which kubelet auto-rotates roughly hourly),
+# this on-disk snapshot is never refreshed for the lifetime of the
+# calico-node pod. After enough elapsed time, the standalone `calico` CNI
+# binary — invoked directly by containerd for every pod ADD (create) and
+# DEL (delete) — starts failing with "connection is unauthorized:
+# Unauthorized", which blocks BOTH new pod creation (stuck
+# ContainerCreating) AND pod deletion (stuck Terminating). Fix: cycle
+# calico-node so its init container re-runs and writes a fresh token.
+if kubectl get pods -n calico-system -l k8s-app=calico-node >/dev/null 2>&1; then
+  doing "scanning recent events for CNI 'Unauthorized' authentication failures"
+
+  STALE_TOKEN_EVENTS=$(kubectl get events -A --field-selector reason=FailedCreatePodSandBox -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null | grep -c "Unauthorized" || true)
+  STALE_TOKEN_EVENTS_DEL=$(kubectl get events -A --field-selector reason=FailedKillPod -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null | grep -c "Unauthorized" || true)
+
+  if [ "${STALE_TOKEN_EVENTS:-0}" -gt 0 ] || [ "${STALE_TOKEN_EVENTS_DEL:-0}" -gt 0 ]; then
+    warn "found CNI 'Unauthorized' errors (create: ${STALE_TOKEN_EVENTS:-0}, delete: ${STALE_TOKEN_EVENTS_DEL:-0}) — calico-node's CNI token has likely gone stale"
+    doing "cycling calico-node to force a fresh token snapshot"
+    kubectl delete pod -n calico-system -l k8s-app=calico-node --ignore-not-found >/dev/null
+
+    doing "waiting up to 90s for calico-node to become ready again"
+    for i in $(seq 1 18); do
+      if kubectl get pods -n calico-system -l k8s-app=calico-node --no-headers 2>/dev/null | awk '{split($2,a,"/"); exit !(a[1]==a[2])}'; then
+        fixed "calico-node is ready with a fresh CNI token"
+        break
+      fi
+      sleep 5
+    done
+
+    doing "waiting 20s for any pods stuck on the stale token to retry and recover"
+    sleep 20
+  else
+    ok "no stale CNI token symptoms found"
+  fi
+else
+  skip "calico-node not present yet (fresh install) — nothing to check"
 fi
 
 # ------------------------------------------------------------------
