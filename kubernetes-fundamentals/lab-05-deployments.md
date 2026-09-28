@@ -794,11 +794,15 @@ Open `http://localhost:9000` in your Windows browser. In the real session
 this loaded Mealie's home page, and `wget http://localhost:9000` from a
 second terminal returned `200 OK`.
 
-**Why forward to the Service and not the pod?** In the real session the
-first attempt forwarded to a specific pod name. That works until the pod is
-replaced. Any rollout or crash gives the replacement a new random name and
-breaks the forward. A Service always points at whichever pods currently
-match, so it survives replacement.
+**Forwarding to the Service versus the pod.** In the real session the first
+attempt forwarded to a specific pod name. Forwarding to `svc/mealie` is more
+convenient, because you don't have to look up a pod name and `kubectl` finds
+a backing pod for you. But it is **not** a load-balanced or self-healing
+tunnel. `kubectl` picks **one** pod when the command starts and tunnels to
+it. If that pod is replaced (a rollout, a crash), the forward drops, and you
+re-run the command so it picks the new pod. A `port-forward` is a debugging
+tool, not a way to keep an app reachable. Lab 8 covers what keeps an app
+reachable.
 
 ### Upgrade it live
 
@@ -880,7 +884,7 @@ at the end saves you from confusion in the next lab.
 | `apply` says `configured` but no pods restarted | You changed something outside `spec.template` (for example `strategy` or `replicas`) | Expected. Only template changes trigger a rollout |
 | `kubectl get pods` shows nothing but you know pods exist | You are looking at a different namespace | `kubectl get pods -A`, or check with `kubectl config view --minify \| grep namespace:` |
 | `set image` says the container was not found | You used the image name instead of the **container** name | Use the `name:` from the YAML (`httpd=httpd:2.4-alpine`) |
-| Port-forward stopped working after an update | It was tied to a specific pod that got replaced | Forward to the Service: `kubectl port-forward svc/<name> ...` |
+| Port-forward stopped working after an update | It tunnels to the single pod it picked at start, and that pod was replaced | Re-run `kubectl port-forward` so it picks the new pod. It does not follow pod replacement, whether you forward to a pod or a Service |
 
 ---
 
@@ -892,7 +896,7 @@ at the end saves you from confusion in the next lab.
 4. **Only template changes roll out.** Editing `replicas` or `strategy` updates the Deployment without restarting pods.
 5. **Rolling updates are careful over-provisioning.** `maxSurge` rounds up and `maxUnavailable` rounds down, so a single replica always gets a new pod before losing the old one.
 6. **Bad updates stall safely,** and `kubectl rollout undo` brings the previous version back in seconds.
-7. **Forward to Services, not pods,** because pod names change and Services do not.
+7. **`kubectl port-forward` is a debugging tunnel to one pod.** Forwarding to a Service just saves you looking up a pod name. If that pod is replaced, the forward drops and you re-run it.
 8. **Data needs volumes.** Without a PersistentVolumeClaim, a rollout or restart throws your data away.
 
 ---
