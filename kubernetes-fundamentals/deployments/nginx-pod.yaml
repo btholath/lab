@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-storage
+  labels:
+    app: nginx-storage
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      ports:
+        - containerPort: 80
+      volumeMounts:
+        - name: scratch-volume
+          mountPath: /usr/share/nginx/html # nginx's real doc root
+    - name: busybox
+      image: busybox
+      command:
+        [
+          "sh",
+          "-c",
+          "echo 'Hello from BusyBox!' > /scratch/index.html && sleep 3600",
+        ]
+      volumeMounts:
+        - name: scratch-volume
+          mountPath: /scratch
+  volumes:
+    - name: scratch-volume
+      emptyDir:
+        sizeLimit: 500Mi

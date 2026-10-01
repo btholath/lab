@@ -2,23 +2,21 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: test
-  name: test
+    app: frontend
+  name: frontend
 spec:
   replicas: 10
   selector:
     matchLabels:
-      app: test
+      app: frontend
   template:
     metadata:
       labels:
-        app: test
+        app: frontend
     spec:
       containers:
         - image: httpd:alpine3.19
           name: httpd
-          command: ["/bin/bash", "-c"]
-          args: ["sleep 5; exit 1"]
   strategy:
     type: RollingUpdate
     rollingUpdate:
