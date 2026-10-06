@@ -66,8 +66,8 @@ systemctl enable --now kubelet
 Use the `kubeadm join`command that was generated in your Master Node server. The below command is just for reference.
 
 ```sh
-kubeadm join 209.38.120.248:6443 --token 9vxoc8.cji5a4o82sd6lkqa \
-        --discovery-token-ca-cert-hash sha256:1818dc0a5bad05b378dd3dcec2c048fd798e8f6ff69b396db4f5352b63414baf
+kubeadm join <MASTER_IP>:6443 --token <TOKEN> \
+        --discovery-token-ca-cert-hash sha256:<HASH>
 ```
 
 #### Step 5: Verficiation (Run in Master Node)

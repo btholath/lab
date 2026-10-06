@@ -118,7 +118,7 @@ preferences: {}
 users:
 - name: kubelet-bootstrap
   user:
-    token: 07401b.f395accd246ae52d
+    token: <TOKEN>
 EOF
 ```
 ##### Important: Make sure you have CA certificate file (ca.crt) in /var/lib/kubernetes directory.
