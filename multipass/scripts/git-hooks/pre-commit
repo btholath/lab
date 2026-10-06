@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# pre-commit: block commits that add likely secrets.
+# Scans only the lines being ADDED in this commit, skips binary files, and never
+# prints the secret itself (only file, line number and the kind of finding).
+#
+# Bypass a deliberate false positive:  add  "secret-scan: allow"  to that line,
+# or run  git commit --no-verify  (use sparingly).
+
+set -u
+
+# label|extended-regex
+PATTERNS=(
+  "Private key (PEM, plain text)|-----BEGIN ((RSA|EC|DSA|OPENSSH|ENCRYPTED|PGP) )?PRIVATE KEY"
+  "Private key (PEM, base64-encoded, e.g. kubeconfig or Secret)|LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0t|LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t|LS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0t|LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0t|LS0tLS1CRUdJTiBFTkNSWVBURUQgUFJJVkFURSBLRVktLS0t|LS0tLS1CRUdJTiBEU0EgUFJJVkFURSBLRVktLS0t"  # secret-scan: allow (pattern definition, not a secret)
+  "Kubeconfig credential data|(client-key-data|client-certificate-data):[[:space:]]*[A-Za-z0-9+/=]{40,}"
+  "AWS access key ID|(AKIA|ASIA)[0-9A-Z]{16}"
+  "kubeadm join token|(--token[ =]|token:[[:space:]]*)[a-z0-9]{6}\.[a-z0-9]{16}"
+  "kubeadm discovery hash|(discovery-token-ca-cert-hash[ =]+)sha256:[a-f0-9]{64}"
+  "GitHub token|gh[pousr]_[A-Za-z0-9]{36,}"
+)
+
+# Added lines as  file:line:content  (binary files are not shown by git diff)
+added_lines() {
+  git diff --cached --diff-filter=ACM -U0 --no-color |
+  awk '
+    /^\+\+\+ /   { f=$0; sub(/^\+\+\+ (b\/)?/, "", f); sub(/\t.*$/, "", f); next }
+    /^@@/        { match($0, /\+[0-9]+/); n = substr($0, RSTART+1, RLENGTH-1) - 1; next }
+    /^\+/        { n++; print f ":" n ":" substr($0, 2) }
+  ' | grep -v "secret-scan: allow"
+}
+
+LINES=$(added_lines)
+[ -z "$LINES" ] && exit 0
+
+FOUND=0
+for entry in "${PATTERNS[@]}"; do
+  label=${entry%%|*}
+  regex=${entry#*|}
+  hits=$(printf '%s\n' "$LINES" | grep -E -e "$regex" | cut -d: -f1,2 | sort -u)
+  if [ -n "$hits" ]; then
+    FOUND=1
+    echo "BLOCKED: $label" >&2
+    printf '%s\n' "$hits" | sed 's/^/    /' >&2
+  fi
+done
+
+if [ "$FOUND" -eq 1 ]; then
+  cat >&2 <<MSG
+
+Commit aborted: the lines above look like secrets (values are not shown).
+  - Replace them with a placeholder such as <REDACTED>, then 'git add' again.
+  - A real secret that was already used somewhere must also be rotated.
+  - For a harmless false positive, add "secret-scan: allow" to the line,
+    or bypass once with: git commit --no-verify
+MSG
+  exit 1
+fi
+exit 0
