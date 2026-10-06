@@ -8,3 +8,6 @@ kubeconfig*
 *.key
 *.pem
 *.crt
+
+# etcd snapshots hold every Secret in the cluster. Never commit them.
+*.db
