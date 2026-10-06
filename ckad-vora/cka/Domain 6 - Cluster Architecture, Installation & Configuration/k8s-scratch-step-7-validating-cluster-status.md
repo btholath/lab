@@ -47,7 +47,7 @@ kubectl get componentstatuses
 ```sh
 kubectl create namespace kplabs
 
-kubectl create secret generic prod-secret --from-literal=username=<VALUE> --from-literal=password=<VALUE>
+kubectl create secret generic prod-secret --from-literal=username=admin --from-literal=password=demo-password
 
 kubectl get secret
 ```
