@@ -1,0 +1,16 @@
+# Pinned to worker1 and tolerates the taint key=value:NoSchedule.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: with-toleration
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: worker1
+  tolerations:
+  - key: "key"
+    operator: "Equal"
+    value: "value"
+    effect: "NoSchedule"
+  containers:
+  - name: nginx
+    image: nginx

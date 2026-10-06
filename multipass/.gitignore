@@ -1,0 +1,10 @@
+# Never commit cluster credentials or join tokens
+*.conf
+admin.conf
+kubeconfig*
+*.kubeconfig
+.kube/
+*token*
+*.key
+*.pem
+*.crt

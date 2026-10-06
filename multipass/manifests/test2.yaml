@@ -1,0 +1,13 @@
+# Cross-node network test: runs on worker2 and fetches a page from a pod on worker1.
+# Edit the IP below to a real nginx pod IP on worker1 (kubectl get pods -o wide).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test2
+spec:
+  nodeName: worker2
+  restartPolicy: Never
+  containers:
+  - name: busybox
+    image: busybox
+    command: ["wget", "-qO-", "10.244.1.2"]

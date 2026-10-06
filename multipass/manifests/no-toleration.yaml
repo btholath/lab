@@ -1,0 +1,11 @@
+# Pinned to worker1. Stays Pending while worker1 has a NoSchedule taint.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-toleration
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: worker1
+  containers:
+  - name: nginx
+    image: nginx

@@ -1,0 +1,6 @@
+# Keep shell scripts and YAML with LF endings (CRLF breaks bash on the VMs)
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.ps1  text eol=crlf
+*.docx binary
