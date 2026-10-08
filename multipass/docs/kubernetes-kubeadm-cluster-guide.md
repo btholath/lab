@@ -32,7 +32,8 @@ This guide walks you from "I have a laptop with WSL/Ubuntu" to a working three-n
 20. Command cheat sheet
 21. A fixed IP for the master, and what to do after a Windows reboot
 22. etcd backup and restore
-23. What to practice next
+23. Upgrading the cluster with kubeadm
+24. What to practice next
 
 # 1. What you will build, and key concepts
 
@@ -1217,6 +1218,10 @@ This removes all VMs permanently. Because the whole build is scripted, you can r
 | Pod evicted and never came back | Standalone pod hit a `NoExecute` taint | Only controller-owned pods are recreated. Use a Deployment (Section 14.5) |
 | `etcdctl snapshot restore` or `snapshot status` is an unknown command | Removed in etcd 3.6 | Use `etcdutl snapshot restore` and `etcdutl snapshot status` (Section 22.2) |
 | `Forbidden` right after an etcd restore | Transient in the worked example | Wait a minute and retry. Checks are in Section 22.7 |
+| `connection reset by peer` while pulling images for an upgrade | A dropped download | Repeat the pull. Use the retry loop (Section 23.5) |
+| After `kubeadm upgrade apply`, `kubectl get nodes` still shows the old version | That column is the kubelet version, and the kubelets are upgraded later | Expected. Continue with Sections 23.7 and 23.8 |
+| `multipass: command not found` inside a VM | The `multipass` command exists only on Windows | Run it in PowerShell (Section 23.10) |
+| `The token '&&' is not a valid statement separator` | Windows PowerShell 5.1 does not support `&&` | Put the commands on separate lines, or run them inside the master shell, where bash supports it |
 | `dial tcp <master-ip>:6443: no route to host` after start | The master's IP changed, and etcd cannot bind to an address it does not hold | Add the fixed address to the master (Section 21.4) |
 | `multipass list` shows `N/A`, `start` or `restart` times out, but the VM answers ping | The VM no longer uses DHCP, so Multipass cannot find it | Log in with the SSH key and remove the static config (Section 21.6) |
 | The fixed address stops working after a Windows reboot | The Default Switch got a new subnet | Section 21.5, steps 2 and 2a |
@@ -1286,6 +1291,11 @@ When asking for help, include the exact command you ran and the full error text,
 | `etcdctl --endpoints=... --cacert=... --cert=... --key=... snapshot save <file>` | Take an etcd snapshot (Section 22) |
 | `etcdutl snapshot status <file> --write-out=table` | Verify a snapshot |
 | `etcdutl snapshot restore <file> --data-dir=<dir> ...` | Restore a snapshot (stop etcd first) |
+| `sudo kubeadm upgrade plan` | Show what an upgrade would change (read-only) |
+| `sudo kubeadm upgrade apply <version>` | Upgrade the control plane |
+| `sudo kubeadm upgrade node` | Upgrade a worker's node configuration |
+| `sudo kubeadm certs check-expiration` | Show certificate expiry dates |
+| `apt-mark hold / unhold kubelet kubeadm kubectl` | Pin or free the package versions |
 
 You now know how to inspect clusters, build one from scratch with kubeadm, run and debug workloads, and tear it all down. Rebuild it a few times without looking at this guide and the six kubeadm steps will become second nature.
 
@@ -1746,13 +1756,269 @@ sudo rm -rf /var/lib/etcd.broken
 - A restore loses everything after the snapshot, so real clusters take snapshots on a schedule (for example from a systemd timer or a CronJob) and copy them off the machine.
 - Which tools the CKA exam environment provides, and which etcd version, should be checked with the Linux Foundation's current exam documentation. It is not covered here.
 
-# 23. What to practice next
+# 23. Upgrading the cluster with kubeadm
 
-This guide covered building a cluster, Deployments, Services, rolling updates, drain and uncordon, selectors, taints and tolerations, a fixed master address, and etcd backup and restore. Good next topics, in rough order of value for CKA:
+## 23.1 The rules
+
+| Rule | Detail |
+|---|---|
+| One minor version at a time | 1.35 to 1.36 to 1.37. You cannot skip a minor version. Patch upgrades inside a minor version are simpler |
+| Control plane first | The API server must be at the same or a newer version than every kubelet |
+| Workers one at a time | The kubelets may lag the control plane. The cluster runs fine in a mixed-version state while you work |
+| Drain before the kubelet upgrade | The docs say you must drain a node before upgrading its kubelet to a new minor version |
+| Match kubeadm and kubelet | The project recommends that the kubelet and kubeadm versions match |
+
+The worked example upgraded **v1.35.9 to v1.36.5**. Kubernetes 1.37 already existed, but kubeadm only offered 1.36, because the next minor version is the only hop allowed. The project supports the three newest minor versions. Web pages disagreed on the latest patch number, so the apt repository is the source of truth: read the version from it, as shown below. This section was run end to end on the worked-example cluster.
+
+## 23.2 What gets upgraded, and how
+
+`kubeadm upgrade plan` prints this table for your cluster:
+
+| Component | Worked example | How it changes |
+|---|---|---|
+| kube-apiserver, kube-controller-manager, kube-scheduler | v1.35.9 to v1.36.5 | `kubeadm upgrade apply` replaces their static-pod manifests, one at a time |
+| etcd | 3.6.6 to 3.6.8 | Replaced the same way, if the new release ships a different etcd |
+| kube-proxy, CoreDNS | 1.35.9 to v1.36.5, v1.13.1 to v1.14.2 | Add-ons that kubeadm updates for you |
+| kubelet and kubectl, on every node | v1.35.9 to v1.36.5 | **You** upgrade these with apt, after draining each node |
+| flannel | not listed | **Not touched.** You installed it, and it has its own releases |
+
+## 23.3 Before you start
+
+**Run in: master VM** (`multipass shell master`). Do not type plain `kubectl` in Windows PowerShell for this cluster.
+
+```bash
+kubectl get nodes -o wide
+kubectl get pods -A
+kubectl version
+df -h /
+```
+
+Everything should be `Ready` and `Running`. Do not start an upgrade on an unhealthy cluster. Then take and verify an etcd snapshot (Section 22), and copy it off the VM:
+
+```bash
+EC="sudo etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key"
+sudo mkdir -p /opt/etcd-backup
+SNAP=/opt/etcd-backup/pre-upgrade-$(date +%Y%m%d-%H%M%S).db
+$EC snapshot save $SNAP
+sudo etcdutl snapshot status $SNAP --write-out=table
+sudo cp $SNAP /home/ubuntu/pre-upgrade.db && sudo chown ubuntu:ubuntu /home/ubuntu/pre-upgrade.db
+```
+
+In PowerShell, copy it to Windows and compare checksums, as in Section 22.6. kubeadm also keeps copies of the old manifests under `/etc/kubernetes/tmp/`. The upgrade output of the worked example showed backups of the manifests only, with no backup of the etcd data, so **your snapshot is the real safety net**. Also read the "Urgent Upgrade Notes" of the target release before you begin.
+
+## 23.4 Point apt at the new version and read the plan
+
+Each minor version has its own package repository. Change the version in the repository line and refresh the signing key (the worked example used the same commands for 1.35 to 1.36):
+
+```bash
+sudo sed -i 's#/core:/stable:/v1.35/#/core:/stable:/v1.36/#g' /etc/apt/sources.list.d/kubernetes.list
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+sudo apt-get update
+VER=$(apt-cache madison kubeadm | awk '{print $3}' | grep '^1\.36\.' | sort -V | tail -1)
+echo "package version: $VER"
+TARGET=v${VER%%-*}
+echo "target: $TARGET"
+```
+
+The worked example printed `1.36.5-1.1` and `v1.36.5`. Install only `kubeadm`. The packages are held, so unhold, install, and hold again:
+
+```bash
+sudo apt-mark unhold kubeadm
+sudo apt-get install -y kubeadm=$VER
+sudo apt-mark hold kubeadm
+kubeadm version -o short
+sudo kubeadm upgrade plan
+```
+
+`kubeadm upgrade plan` only reads. Check that it lists your `TARGET`, and look at the "MANUAL UPGRADE REQUIRED" column of the component-config table. In the worked example both entries said `no`. Installing the new `kubeadm` changes nothing in the cluster.
+
+## 23.5 Pre-pull the images
+
+`kubeadm upgrade apply` waits a limited time for each control-plane pod to restart, so download the images first.
+
+```bash
+sudo kubeadm config images list --kubernetes-version $TARGET
+for i in 1 2 3 4 5; do
+  sudo kubeadm config images pull --kubernetes-version $TARGET && break
+  echo "attempt $i failed, retrying in 20 seconds"; sleep 20
+done
+```
+
+The worked example's first attempt stopped with `connection reset by peer` on one image. The pull is safe to repeat, and images already downloaded are skipped. The `list` output shows the names for the workers. kube-proxy and CoreDNS are the images that will run there, so pull them on each worker, **one at a time**. The `timeout` stops a hung pull after five minutes:
+
+**Run in: Windows PowerShell**
+
+```powershell
+multipass exec worker1 -- sudo timeout 300 ctr -n k8s.io images pull registry.k8s.io/kube-proxy:v1.36.5
+multipass exec worker1 -- sudo timeout 300 ctr -n k8s.io images pull registry.k8s.io/coredns/coredns:v1.14.2
+multipass exec worker2 -- sudo timeout 300 ctr -n k8s.io images pull registry.k8s.io/kube-proxy:v1.36.5
+multipass exec worker2 -- sudo timeout 300 ctr -n k8s.io images pull registry.k8s.io/coredns/coredns:v1.14.2
+```
+
+These pre-pulls only save waiting time. Skipping one means the pods on that node download the image as they start.
+
+## 23.6 Upgrade the control plane
+
+**Run in: master VM**
+
+```bash
+sudo kubeadm upgrade apply v1.36.5 -y 2>&1 | tee ~/upgrade-apply.log
+```
+
+Use your own `TARGET`. `-y` skips the confirmation question. In the worked example kubeadm then:
+
+1. Wrote the new manifests to a temporary folder and **backed up the old ones** under `/etc/kubernetes/tmp/`.
+2. Replaced etcd, then the API server, controller manager and scheduler, one at a time, waiting for each to come back.
+3. **Renewed the control-plane certificates.**
+4. Updated the kubelet configuration, then CoreDNS and kube-proxy.
+
+It ended with `[upgrade] SUCCESS! A control plane node of your cluster was upgraded to "v1.36.5".` Expect the API to be unreachable for a short while during the etcd and API server steps, and do not interrupt the command. kubeadm rolls a component back by itself if a step fails. Check the result:
+
+```bash
+kubectl version
+kubectl get nodes
+kubectl get pods -n kube-system
+```
+
+`Server Version` shows the new version, but **all nodes still show the old version**. That column reports each node's kubelet, and the kubelets have not been upgraded yet.
+
+## 23.7 Upgrade the master's kubelet and kubectl
+
+```bash
+VER=1.36.5-1.1
+kubectl drain master --ignore-daemonsets --delete-emptydir-data
+sudo apt-mark unhold kubelet kubectl
+sudo apt-get install -y kubelet=$VER kubectl=$VER
+sudo apt-mark hold kubelet kubectl
+sudo systemctl daemon-reload
+sudo systemctl restart kubelet
+```
+
+Wait about 30 seconds, then:
+
+```bash
+kubectl get nodes
+kubectl uncordon master
+```
+
+In the worked example the drain had nothing to evict except the DaemonSet pods, because the new CoreDNS pods had already gone to the workers. The master then showed `Ready,SchedulingDisabled` until the uncordon. The kubelet restart made the control-plane pods restart once more (etcd to 2 restarts, the API server to 1), and they stayed stable afterwards. Confirm before touching the workers:
+
+```bash
+kubectl get pods -n kube-system
+kubectl get --raw='/readyz'
+$EC endpoint health --write-out=table
+```
+
+Go on only if the restart counts have stopped rising, `readyz` prints `ok` and etcd health says `true`.
+
+## 23.8 Upgrade each worker, one at a time
+
+Do worker1 completely, then worker2. **Commands that start with `multipass` run in Windows PowerShell. Commands that start with `sudo` run inside the worker's shell.**
+
+**Step 1, in a worker shell** (`multipass shell worker1`): point apt at the new version and install `kubeadm`.
+
+```bash
+sudo sed -i 's#/core:/stable:/v1.35/#/core:/stable:/v1.36/#g' /etc/apt/sources.list.d/kubernetes.list
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+sudo apt-get update
+VER=1.36.5-1.1
+sudo apt-mark unhold kubeadm
+sudo apt-get install -y kubeadm=$VER
+sudo apt-mark hold kubeadm
+kubeadm version -o short
+```
+
+**Step 2, in the same shell:** upgrade the node's configuration, then leave the shell.
+
+```bash
+sudo kubeadm upgrade node
+exit
+```
+
+It is short, because a worker has no control-plane pods. It prints `Skipping ... Not a control plane node` several times, which is expected.
+
+**Step 3, in PowerShell:** drain the worker **before** upgrading its kubelet.
+
+```powershell
+multipass exec master -- kubectl drain worker1 --ignore-daemonsets --delete-emptydir-data
+```
+
+**Step 4, in a new worker shell:** upgrade the kubelet and kubectl, then restart the kubelet.
+
+```bash
+VER=1.36.5-1.1
+sudo apt-mark unhold kubelet kubectl
+sudo apt-get install -y kubelet=$VER kubectl=$VER
+sudo apt-mark hold kubelet kubectl
+sudo systemctl daemon-reload
+sudo systemctl restart kubelet
+exit
+```
+
+**Step 5, in PowerShell:** check and uncordon.
+
+```powershell
+Start-Sleep -Seconds 30
+multipass exec master -- kubectl get nodes
+multipass exec master -- kubectl uncordon worker1
+```
+
+Repeat all five steps for worker2, with `worker2` in the shell, drain and uncordon commands. Draining a worker that holds all four nginx replicas moves every replica at once, so the Service may stop answering for a few seconds. A PodDisruptionBudget exists to prevent that.
+
+## 23.9 Verify the result
+
+```powershell
+multipass exec master -- kubectl get nodes
+multipass exec master -- kubectl version
+multipass exec master -- apt-mark showhold
+curl.exe -s -o NUL -w "%{http_code}`n" http://172.25.246.7:31260
+multipass exec master -- sudo kubeadm certs check-expiration
+```
+
+| Check | What you should see |
+|---|---|
+| Nodes | All `Ready`, all at the new version |
+| `kubectl version` | Client and server both at the new version |
+| `showhold` (run on each node) | `kubeadm`, `kubectl`, `kubelet`. The holds stop a plain `apt upgrade` from moving a component by accident |
+| curl | `200` |
+| Certificates | About 364 days left on every certificate. The upgrade renews them. The CAs show about 9 years |
+
+Nothing moves pods back after an uncordon, so rebalance the Deployment with `kubectl rollout restart deployment nginx`. In the worked example this gave two pods per worker.
+
+A kubeadm certificate lasts a year unless renewed. An upgrade renews it, so upgrading at least once a year keeps the cluster healthy. The `~/.kube/config` copy of `admin.conf` is **not** renewed by an upgrade, because it is a copy. After a renewal, recopy it. This runs **inside the master VM** (`multipass shell master`), not in Windows PowerShell, because `~` and `$(id -u)` are for the master's bash. To see whether your copy is older, compare the two certificate dates first (they print only dates):
+
+**Run in: master VM**
+
+```bash
+grep client-certificate-data ~/.kube/config | awk '{print $2}' | base64 -d | openssl x509 -noout -enddate
+sudo grep client-certificate-data /etc/kubernetes/admin.conf | awk '{print $2}' | base64 -d | openssl x509 -noout -enddate
+sudo cp /etc/kubernetes/admin.conf ~/.kube/config
+sudo chown $(id -u):$(id -g) ~/.kube/config
+kubectl get nodes
+```
+
+## 23.10 Mistakes that happened in the worked example
+
+| Mistake | What happened | Fix |
+|---|---|---|
+| Typing `kubectl` in Windows PowerShell | `connection refused` to `127.0.0.1`, because Windows has its own kubectl | Use `multipass exec master -- kubectl ...` or work inside the master shell |
+| Leaving out the VM name: `multipass exec -- kubectl ...` | `instance "kubectl" does not exist` | The name comes first: `multipass exec master -- kubectl ...` |
+| Typing a `multipass` command inside a worker's shell | `multipass: command not found`. The command only exists on Windows | Run `multipass ...` commands in PowerShell |
+| Upgrading a worker's kubelet before draining it | It worked, but the docs require draining first, and in a real cluster it can disrupt pods | Drain first (Step 3), then upgrade |
+| `connection reset by peer` during the image pull | The pull stopped | Repeat it, and use the retry loop (Section 23.5) |
+
+## 23.11 Rolling back, and the next hop
+
+There is no simple downgrade. The realistic rollback is to restore the pre-upgrade etcd snapshot and reinstall the old packages, which was not tested. On a lab cluster, rebuilding is often easier. That is why you rehearse an upgrade here before doing it for real.
+
+Moving on to 1.37 repeats the whole procedure with `v1.37` in the repository line. It was not run in the worked example. Read the target release's upgrade notes first.
+
+# 24. What to practice next
+
+This guide covered building a cluster, Deployments, Services, rolling updates, drain and uncordon, selectors, taints and tolerations, a fixed master address, etcd backup and restore, and a kubeadm upgrade. Good next topics, in rough order of value for CKA:
 
 | Topic | What to try |
 |---|---|
-| `kubeadm upgrade` | `kubeadm upgrade plan` and `apply`, one node at a time with drain and uncordon |
 | Node affinity | `requiredDuringSchedulingIgnoredDuringExecution`, the flexible form of `nodeSelector` |
 | Resource requests and limits | Ask for more CPU or memory than a 2 GB VM has and read the `Pending` message |
 | Topology spread constraints | Force an even spread of pods across nodes |
