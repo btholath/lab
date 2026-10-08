@@ -702,11 +702,35 @@ A new pod only counts as available after its **readiness probe** passes (and `mi
 
 # 9. Implementing `maxSurge` and `maxUnavailable`
 
-All steps **(not run)** on this cluster. To make the pace visible, the lab uses a readiness probe with a delay, so each new pod takes about ten seconds to become ready. You need **two** shells: one to watch and one to change things. Open a second master shell in another PowerShell window with `multipass shell master`.
+Labs 18 to 21 were **run on the real cluster**, and the observed results are shown after each lab. Lab 22 was not run. To make the pace visible, the labs use a readiness probe with a delay, so each new pod takes about ten seconds to become available.
+
+You need **two** shells: one to change things (**Shell A**) and one to watch (**Shell B**). Open a second master shell with `multipass shell master` in another PowerShell window. A new shell reads the same kubeconfig file, so it uses the `appdesign` namespace too.
+
+## The counter
+
+Counting pod lines is unreliable, because terminating pods still appear in `kubectl get pods`. A better measure is the Deployment's own numbers, printed every two seconds:
+
+```bash
+while true; do
+  echo "$(date +%T)  $(kubectl get deployment rolling -o jsonpath='{.status.replicas} total, {.status.availableReplicas} available')"
+  sleep 2
+done
+```
+
+`total` is the number of pods the Deployment owns, and `available` is the number ready to serve. In a steady state it prints `4 total, 4 available`. Press Ctrl+C to stop it.
+
+> **Habit to build:** after every `kubectl set image`, look for the line `deployment.apps/NAME image updated`. If it is missing, the image was already that value, the pod template did not change, and **no rollout starts** (see Lab 20).
 
 ## Lab 18: the safe setting, `maxSurge: 1`, `maxUnavailable: 0`
 
-**Shell A** (set up and update):
+Optionally pre-pull the second image on both workers, so the timings are not mixed with a download. Run these in PowerShell, one at a time:
+
+```powershell
+multipass exec worker1 -- sudo timeout 300 ctr -n k8s.io images pull docker.io/library/nginx:alpine
+multipass exec worker2 -- sudo timeout 300 ctr -n k8s.io images pull docker.io/library/nginx:alpine
+```
+
+**Shell A:**
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -741,73 +765,151 @@ EOF
 kubectl rollout status deployment/rolling
 ```
 
-Wait for `successfully rolled out`. Then in **Shell B**, start the watch (namespace `appdesign` is set in your context, but a new shell reads the same kubeconfig, so it is the default there too):
+When the Deployment is first created there is no old pod, so all four start together, and `rollout status` climbs from `0 of 4` to `3 of 4 updated replicas are available`. `maxSurge` and `maxUnavailable` only govern **updates**.
 
-```bash
-kubectl get pods -l app=rolling -w
-```
-
-In **Shell A**, trigger the update:
+Start the counter in **Shell B**, wait for a few steady lines, then in **Shell A**:
 
 ```bash
 kubectl set image deployment/rolling nginx=nginx:alpine
 kubectl rollout status deployment/rolling
 ```
 
-**What to expect in the watch:**
+### Observed on the real cluster
 
-- At most **5 pods** exist at once (4 desired plus 1 surge).
-- At least **4 are `Running` and ready** at every moment, because `maxUnavailable` is 0. A new pod must pass its readiness probe (about 10 seconds) before an old pod is removed.
-- The update goes **one pod at a time**, so it is slow and gentle.
+| Number | Predicted | Observed |
+|---|---|---|
+| Highest `total` | 5 | **5**, and never 6 |
+| Lowest `available` | 4 | **4** on every line (about 35 samples). It never dipped |
+| Duration | 40 to 60 s | **about 51 s** (10:45:21 to 10:46:10) |
+
+The counter held `4 total, 4 available`, then `5 total, 4 available` for the whole update, then `4 total, 4 available` again. `rollout status` stepped through `1 out of 4`, `2 out of 4`, `3 out of 4` and then `1 old replicas are pending termination`.
+
+Four waves of about 12 seconds each add up to the 51 seconds: a new pod starts, waits out its 10-second readiness probe, becomes available, and only then is an old pod removed. That waiting is the price of `maxUnavailable: 0`. The counter never showed `5 available`, probably because the handoff between waves is shorter than the two-second sampling interval (an inference).
+
+Afterwards, `kubectl get rs -l app=rolling` showed the old ReplicaSet at **0** and the new one at **4**, and all four pods ran `nginx:alpine`.
 
 ## Lab 19: the cheap setting, `maxSurge: 0`, `maxUnavailable: 2`
 
-Change only the strategy. A strategy change does **not** start a rollout by itself:
+Change only the strategy. A strategy change does **not** start a rollout:
 
 ```bash
 kubectl patch deployment rolling -p '{"spec":{"strategy":{"rollingUpdate":{"maxSurge":0,"maxUnavailable":2}}}}'
 kubectl get deployment rolling -o jsonpath='{.spec.strategy.rollingUpdate}{"\n"}'
 ```
 
-Now start a rollout, with the watch still running in Shell B:
+Start the counter in Shell B. In Shell A, change the image back, then check the ReplicaSets:
 
 ```bash
 kubectl set image deployment/rolling nginx=nginx
 kubectl rollout status deployment/rolling
+kubectl get rs -l app=rolling
+kubectl rollout history deployment/rolling
 ```
 
-**What to expect:**
+### Observed on the real cluster
 
-- **Never more than 4 pods.** There is no surge.
-- Two old pods are removed **first**, so only **2 pods are available** at first (4 minus `maxUnavailable` of 2), and two new pods start in the freed slots.
-- The update proceeds in **two waves of two**, faster than Lab 18, but with reduced capacity during each wave.
+| Number | Predicted | Observed |
+|---|---|---|
+| Highest `total` | 4 | **4**. No extra pods were ever created |
+| Lowest `available` | 2 | **2**, from 10:57:41 to 10:58:04 |
+| Duration | about half of Lab 18 | **about 29 s** (10:57:41 to 10:58:10), 57% of Lab 18's time |
 
-## Lab 20: percentages
+The counter held `4 total, 4 available` until 10:57:41, then dropped straight to **`4 total, 2 available`**: two old pods were removed at once. It stayed at 2 for about 23 seconds, then showed 3, then 4. I had predicted "two waves of two", but `rollout status` showed the new ReplicaSet going from 0 to 2 and then to 3, so the pods did not arrive in two clean pairs. The numbers that matter held: a maximum of 4, a minimum of 2, and a faster update.
+
+Two further results:
+
+- `patched (no change)` means the strategy already had those values.
+- Setting the image back to `nginx` made the pod template identical to the original, so the Deployment **reused the old ReplicaSet** (`rolling-85bc46c95d`, now 4 of 4) and scaled the other to 0. No third ReplicaSet appeared. The history showed revisions **2 and 3**, so the old template was re-labeled as the newest revision, just like the rollback on the nginx Deployment.
+
+**Comparing the two settings:**
+
+| | Lab 18 | Lab 19 |
+|---|---|---|
+| Settings | `maxSurge: 1`, `maxUnavailable: 0` | `maxSurge: 0`, `maxUnavailable: 2` |
+| Max pods | 5 | 4 |
+| Min available | 4 | 2 |
+| Time | 51 s | 29 s |
+| Costs | One pod's worth of spare room, and time | Half the capacity for about 25 s |
+
+## Lab 20: percentages, and a bad rollout
+
+With 4 replicas, `maxSurge: 50%` rounds **up** to 2, and `maxUnavailable: 25%` rounds **down** to 1, so the prediction is a maximum of **6 pods** and a minimum of **3 available**.
 
 ```bash
 kubectl patch deployment rolling -p '{"spec":{"strategy":{"rollingUpdate":{"maxSurge":"50%","maxUnavailable":"25%"}}}}'
+kubectl get deployment rolling -o jsonpath='{.spec.strategy.rollingUpdate}{"\n"}'
 kubectl set image deployment/rolling nginx=nginx:alpine
-kubectl get pods -l app=rolling -w
+kubectl rollout status deployment/rolling
 ```
 
-With 4 replicas: `maxSurge` of 50% is 2 (rounded up), and `maxUnavailable` of 25% is 1 (rounded down). Expect at most **6 pods** and at least **3 available**.
+### Observed on the real cluster: an accidental stall
+
+Two things went differently from the plan, and both are instructive.
+
+**1. A no-op update.** A first `kubectl set image deployment/rolling nginx=nginx` printed **no** `image updated` line, and `rollout status` reported success at once. The image was already `nginx`, so the template did not change and nothing rolled out. The counter showed `4 total, 4 available` throughout.
+
+**2. A typo that stalled the rollout.** The next command was `kubectl set image deployment/rolling nginx=nginx-alpine`, with a **hyphen** where the colon belongs. `nginx-alpine` is not an image, so the new pods could never start. The rollout stalled, and the state was:
+
+```text
+NAME                 DESIRED   CURRENT   READY   AGE
+rolling-57f748f7b4   3         3         0       10m      <- new, bad image: none ready
+rolling-85bc46c95d   3         3         3       37m      <- old: still serving
+
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+rolling   3/4     3            3           38m
+
+NAME                       IMAGE
+rolling-57f748f7b4-7n9xn   nginx-alpine
+rolling-57f748f7b4-kwmls   nginx-alpine
+rolling-57f748f7b4-sk8zx   nginx-alpine
+rolling-85bc46c95d-2xpf5   nginx
+rolling-85bc46c95d-mx6bk   nginx
+rolling-85bc46c95d-rkft2   nginx
+```
+
+| What you see | What it shows |
+|---|---|
+| **3 old + 3 new = 6 pods** | The maximum: 4 plus a surge of 2 (50% of 4) |
+| **3 available** | The minimum: 4 minus 1 (25% of 4, rounded down) |
+| New pods `READY 0` | Their image could not be used. (Their `STATUS` column was not captured. `ErrImagePull` or `ImagePullBackOff` is the almost certain cause) |
+| `rollout status` stuck on `3 out of 4 new replicas have been updated` | The update could not make progress, and could not make things worse |
+
+This is the safety of a rolling update on a bad image. The rollout went as far as the limits allowed and then stopped, with three healthy old pods still serving. The fix is `kubectl rollout undo deployment/rolling`, or setting a correct image.
+
+**3. The progress deadline.** After the correct `nginx:alpine` was set, `kubectl rollout status` immediately printed:
+
+```text
+error: deployment "rolling" exceeded its progress deadline
+```
+
+By then the stalled rollout was more than 10 minutes old, and a Deployment gives up on a rollout that makes no progress for `progressDeadlineSeconds` (default **600**). It looks like `rollout status` reported that earlier timeout right after the corrected update, which is my best explanation, not something verified. The Deployment was deleted before it could be seen whether the corrected rollout then succeeded. The lesson: this error does not prove the newest change failed, so check `kubectl get rs` and `kubectl get pods`.
+
+A clean percentage run (a correct image from a healthy start) was **not** captured. Expect up to 6 total and at least 3 available.
 
 ## Lab 21: both zero is refused
 
 ```bash
 kubectl patch deployment rolling -p '{"spec":{"strategy":{"rollingUpdate":{"maxSurge":0,"maxUnavailable":0}}}}'
+kubectl get deployment rolling -o jsonpath='{.spec.strategy.rollingUpdate}{"\n"}'
 ```
 
-Expect an error from the API, since the update could never progress. Nothing changes.
+### Observed on the real cluster
 
-## Lab 22: compare with `Recreate` timing
+```text
+The Deployment "rolling" is invalid: spec.strategy.rollingUpdate.maxUnavailable: Invalid value: 0: may not be 0 when `maxSurge` is 0
+{"maxSurge":"50%","maxUnavailable":"25%"}
+```
 
-If you ran Lab 16, compare the watch from that lab: with `Recreate` there is a moment with **no** pods at all, while the rolling settings above never had fewer than the minimum shown in the table.
+The API refuses the change, and the previous values are untouched.
+
+## Lab 22: compare with `Recreate` timing **(not run)**
+
+If you ran Lab 16, compare its watch: with `Recreate` there is a moment with **no** pods at all, while the settings above never went below the minimums shown.
 
 ## Clean up
 
 ```bash
-kubectl delete deployment rolling web
+kubectl delete deployment rolling
 ```
 
 ---
@@ -1036,7 +1138,7 @@ spec:
 | `Never` | The pod is marked `Failed`, and the Job creates a **new pod** for the retry. You keep each failed pod for inspection |
 | `OnFailure` | The container is restarted **inside the same pod**. The pod stays, with a growing `RESTARTS` count |
 
-Finished pods are **not** deleted when the Job completes. They stay in `Completed` (or `Error`) state, so you can read their logs, until you delete the Job or its `ttlSecondsAfterFinished` expires.
+Pods of a Job that **completes** are not deleted, and neither are failed pods created under `restartPolicy: Never`. (When a Job fails, pods that are still running are deleted, as Labs 29 and 36 showed.) They stay in `Completed` (or `Error`) state, so you can read their logs, until you delete the Job or its `ttlSecondsAfterFinished` expires.
 
 ## Patterns
 
@@ -1111,7 +1213,7 @@ Each run creates a Job named `<cronjob-name>-<number>`.
 
 # 13. Implementing Jobs and CronJobs, including `activeDeadlineSeconds`
 
-All labs **(not run)** on this cluster.
+Labs 27 and 29 were **run on the real cluster**, with their results shown after each lab. The other labs in this section were not run.
 
 ## Lab 27: a simple Job
 
@@ -1137,6 +1239,26 @@ kubectl logs job/hello-job
 ```
 
 Expect the Job to reach `COMPLETIONS 1/1`, its pod to show **`Completed`**, and the logs to show `hello from <pod-name>` and `done`. The pod is still there afterwards. The label `job-name=hello-job` is added to a Job's pods automatically (check with `kubectl get pods --show-labels`).
+
+### Observed on the real cluster
+
+```text
+job.batch/hello-job created
+job.batch/hello-job condition met
+NAME        STATUS     COMPLETIONS   DURATION   AGE
+hello-job   Complete   1/1           9s         9s
+NAME              READY   STATUS      RESTARTS   AGE
+hello-job-n6z79   0/1     Completed   0          9s
+hello from hello-job-n6z79
+done
+```
+
+| Output | Meaning |
+|---|---|
+| `STATUS Complete`, `COMPLETIONS 1/1` | The Job did what it was created for, and stopped |
+| `DURATION 9s` | The 5-second `sleep`, plus about 4 seconds to start the container (the extra time is an inference) |
+| Pod `hello-job-n6z79`, `READY 0/1`, `Completed` | The container finished, so `0/1` is normal. The pod stays so you can read its logs |
+| `hello from hello-job-n6z79` | `$(hostname)` inside a pod is the pod's name |
 
 ## Lab 28: several completions, in parallel
 
@@ -1164,7 +1286,7 @@ Press Ctrl+C when finished. Expect **two pods at a time**, in three waves, and `
 
 ## `activeDeadlineSeconds`
 
-`activeDeadlineSeconds` is a **time limit for the whole Job**, counted from when the Job starts. It covers all pods and all retries together. When the time is up, Kubernetes **terminates any running pods** and marks the Job failed with the reason `DeadlineExceeded`. It takes precedence over `backoffLimit`: a Job with retries left is still stopped when the deadline passes.
+`activeDeadlineSeconds` is a **time limit for the whole Job**, counted from when the Job starts. It covers all pods and all retries together. When the time is up, Kubernetes **terminates any running pods** and marks the Job failed with the reason `DeadlineExceeded`. The final `Failed` condition appears only once the pods have actually stopped, so a pod that is slow to stop delays it (see the observed run in Lab 29). It takes precedence over `backoffLimit`: a Job with retries left is still stopped when the deadline passes.
 
 Do not confuse it with the pod-level field of the same name, which limits one pod's lifetime. The Job-level one lives under the Job's own `spec`.
 
@@ -1197,6 +1319,78 @@ kubectl describe job deadline-job
 ```
 
 Expect a `Failed` condition with the reason **`DeadlineExceeded`**, and an event saying the Job was active longer than its deadline. In recent versions you may also see a `FailureTarget` condition listed before `Failed`.
+
+### Observed on the real cluster
+
+A timeline printed every three seconds, with the pod's name and status:
+
+```text
+14:32:22  deadline-job-p28ts ContainerCreating
+14:32:25  deadline-job-p28ts Running
+[... Running until 14:32:40 ...]
+14:32:43  deadline-job-p28ts Terminating
+[... Terminating until 14:33:11 ...]
+14:33:14  No found
+```
+
+(`No found` is the awk fragment of kubectl's own message `No resources found`, so it means the pod was gone.)
+
+| Time | Status | What happened |
+|---|---|---|
+| 14:32:22 | `ContainerCreating` | The Job started |
+| 14:32:25 to 14:32:40 | `Running` | About 18 seconds of running |
+| 14:32:43 | `Terminating` | The deadline fired, **20 seconds** after the Job began |
+| 14:32:43 to 14:33:11 | `Terminating` | **About 30 seconds** stuck in Terminating |
+| 14:33:14 on | gone | The pod was removed |
+
+The Job's conditions and events:
+
+```text
+FailureTarget Failed  DeadlineExceeded DeadlineExceeded
+
+Events:
+  Type     Reason            Age   From            Message
+  Normal   SuccessfulCreate  85s   job-controller  Created pod: deadline-job-p28ts
+  Normal   SuccessfulDelete  65s   job-controller  Deleted pod: deadline-job-p28ts
+  Warning  DeadlineExceeded  34s   job-controller  Job was active longer than specified deadline
+```
+
+| Observation | Explanation |
+|---|---|
+| `SuccessfulDelete` is **20 seconds** after `SuccessfulCreate` (85 s and 65 s ago) | The Job controller deleted the pod exactly at the deadline |
+| The pod then took **about 30 seconds** to disappear | That is Kubernetes' default grace period. A shell running as a container's main process ignores the termination signal, so Kubernetes waits the full 30 seconds and then kills it. The exact 30 seconds fits this explanation, though the cause was not confirmed |
+| `DeadlineExceeded` appeared about **51 seconds** after the pod was created | That is when the pod finally disappeared, so the `Failed` condition seems to have been set only after the pod was gone |
+| Two conditions, `FailureTarget` then `Failed`, both `DeadlineExceeded` | `FailureTarget` marks the moment the Job decided to fail, and `Failed` is the final state. Recent versions use both. Compare their `lastTransitionTime` values to see the gap: `kubectl get job NAME -o jsonpath='{range .status.conditions[*]}{.type}{"  "}{.lastTransitionTime}{"\n"}{end}'` |
+
+So the deadline is enforced on time (20 s), but **a Job takes as long as its slowest pod takes to stop**.
+
+## Lab 29b: end the pod quickly **(not run)**
+
+Two ways to avoid the 30-second wait. Delete the finished Job first (`kubectl delete job deadline-job`), then try either.
+
+**Handle the signal**, so the shell exits at once:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: deadline-job
+spec:
+  activeDeadlineSeconds: 20
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: sleeper
+        image: busybox
+        command: ["sh", "-c", "trap 'exit 0' TERM; echo start; sleep 300 & wait"]
+EOF
+```
+
+**Or shorten the grace period** by adding `terminationGracePeriodSeconds: 2` under the pod's `spec` (next to `restartPolicy`).
+
+With the timeline loop from Lab 29, expect `Terminating` to last only a second or two, and the Job's `Failed` condition to follow almost immediately after the 20-second mark.
 
 ## Lab 30: the deadline beats the retries **(not run)**
 
@@ -1266,7 +1460,7 @@ Make a Job that outlasts the schedule: `command: ["sh","-c","sleep 100"]` with `
 
 `backoffLimit` is the number of **retries** a Job allows before it gives up and is marked **failed**. The default is **6**.
 
-When a pod fails, the Job controller creates a replacement, but with an **exponential back-off delay**: roughly 10 seconds, then 20, 40, 80 and so on, capped at six minutes. The delay prevents a broken Job from hammering the cluster.
+When a pod fails, the Job controller creates a replacement, but with an **exponential back-off delay**: roughly 10 seconds, then 20, 40, 80 and so on, capped at six minutes. On the real cluster the gaps between pod creations were **11, 23 and 43 seconds** (Lab 34). The delay prevents a broken Job from hammering the cluster.
 
 When the limit is reached, the Job gets a `Failed` condition with the reason **`BackoffLimitExceeded`**, and no more pods are created.
 
@@ -1277,7 +1471,7 @@ When the limit is reached, the Job gets a `Failed` condition with the reason **`
 | `Never` | **Failed pods.** Each failure creates a new pod, so you see one pod per attempt |
 | `OnFailure` | **Container restarts** inside the one pod |
 
-With `restartPolicy: Never`, a `backoffLimit` of N allows the first attempt plus up to N retries, so **up to N + 1 pods** in total. `backoffLimit: 0` means **no retries at all**: one failure fails the Job. The exact count can differ slightly with timing, so count the pods rather than assuming.
+With `restartPolicy: Never`, a `backoffLimit` of N allows the first attempt plus N retries, so **N + 1 pods** in total. On the real cluster, `backoffLimit: 3` produced exactly **4 pods** (Lab 34). `backoffLimit: 0` means **no retries at all**: one failure fails the Job, and Lab 35 produced exactly one pod.
 
 ## `backoffLimit` versus `activeDeadlineSeconds`
 
@@ -1291,7 +1485,7 @@ Use both for a robust Job. A pod that hangs never "fails", so `backoffLimit` alo
 
 ## What to do with failed pods
 
-Failed pods are **kept** (with `Never`), so you can read their logs:
+Failed pods are **kept** (with `Never`), so you can read their logs. With `OnFailure` the opposite happened on the real cluster: when the Job reached its limit, the controller **deleted the pod** (Lab 36), and its logs went with it.
 
 ```bash
 kubectl get pods -l job-name=<JOB-NAME>
@@ -1304,7 +1498,13 @@ They are removed when you delete the Job or when its TTL expires.
 
 # 15. Implementing `backoffLimit`
 
-All labs **(not run)** on this cluster.
+Labs 34 to 37 were **run on the real cluster**, and the observed results are shown after each lab.
+
+**Tips for these labs:**
+
+- `kubectl wait` prints nothing while it waits, which looks like a hang. It prints `condition met` when the Job reaches the state you asked for.
+- Keep the laptop awake while a timing loop runs. In one run, the shell paused for about 18 minutes (its timestamps jumped from `21:39:26` to `21:57:46`), and the Job itself had done nothing during that time.
+- Compare **creation timestamps** to measure retry timing. They do not depend on when you happen to look.
 
 ## Lab 34: a Job that always fails, with `backoffLimit: 3`
 
@@ -1324,29 +1524,50 @@ spec:
         image: busybox
         command: ["sh", "-c", "echo attempt at $(date); exit 1"]
 EOF
-kubectl get pods -l job-name=backoff-job -w
+kubectl wait --for=condition=failed job/backoff-job --timeout=240s
 ```
 
-Leave the watch running for a couple of minutes, then press Ctrl+C. **Expect:**
-
-- A first pod, then new pods created at **growing intervals** (about 10, 20, then 40 seconds apart).
-- Each pod ends in `Error`.
-- After the retries are used up, **no more pods appear**. With `backoffLimit: 3`, expect around 4 pods in total.
-
-Then check the outcome:
+Then read the outcome:
 
 ```bash
-kubectl get pods -l job-name=backoff-job
-kubectl get job backoff-job -o jsonpath='{.status.conditions[*].type}{"  "}{.status.conditions[*].reason}{"\n"}'
-kubectl describe job backoff-job
+kubectl get pods -l job-name=backoff-job --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,CREATED:.metadata.creationTimestamp
+kubectl get job backoff-job -o jsonpath='{.status.failed}{" failed pods, conditions: "}{.status.conditions[*].type}{"  "}{.status.conditions[*].reason}{"\n"}'
+kubectl get pods -l job-name=backoff-job --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{"\n"}{end}' | while read t; do s=$(date -u -d "$t" +%s); [ -n "$prev" ] && echo "gap: $((s-prev))s"; prev=$s; done
 kubectl logs <ONE-OF-THE-FAILED-PODS>
 ```
 
-Expect a `Failed` condition with the reason **`BackoffLimitExceeded`**. Count the pods: that count is what the setting produced on your cluster. The logs show `attempt at <date>`, and the timestamps of the different pods show the back-off delays.
+The last command prints the seconds between consecutive pod creations. Replace `<ONE-OF-THE-FAILED-PODS>` with a real pod name, brackets included.
+
+### Observed on the real cluster
+
+```text
+NAME                STATUS   CREATED
+backoff-job-zcfd5   Failed   2026-10-08T21:38:14Z
+backoff-job-gz4vk   Failed   2026-10-08T21:38:25Z
+backoff-job-nm7rg   Failed   2026-10-08T21:38:48Z
+backoff-job-djrxr   Failed   2026-10-08T21:39:31Z
+4 failed pods, conditions: FailureTarget Failed  BackoffLimitExceeded BackoffLimitExceeded
+gap: 11s
+gap: 23s
+gap: 43s
+
+attempt at Thu Oct 8 21:38:15 UTC 2026
+```
+
+| Prediction | Observed |
+|---|---|
+| 4 pods (the first attempt plus 3 retries) | **4 pods**, and `failed=4` |
+| Gaps of about 10, 20 and 40 seconds | **11, 23 and 43 seconds** |
+| Final state `Failed`, reason `BackoffLimitExceeded` | `FailureTarget Failed`, both with `BackoffLimitExceeded` |
+| About a minute and a half | **About 78 seconds** from the first pod to the last |
+
+The gaps roughly double (11, then 23, then 43), which is the exponential back-off. Each is a second or three above 10, 20 and 40, since the pod's own run time adds a little. A fourth retry would have waited about 80 seconds, up to a cap of six minutes.
+
+While the retries were running, a snapshot taken at about a minute showed `failed=3` and an **empty** conditions list. The Job is not failed until the limit is used up.
+
+The log shows one line, `attempt at ...`, and its time is one second after the pod's creation, so the container started almost at once (the image was cached).
 
 ## Lab 35: `backoffLimit: 0`, no retries
-
-Delete the Job and recreate it with `backoffLimit: 0`:
 
 ```bash
 kubectl delete job backoff-job
@@ -1365,12 +1586,32 @@ spec:
         image: busybox
         command: ["sh", "-c", "echo attempt at $(date); exit 1"]
 EOF
+kubectl wait --for=condition=failed job/backoff-job --timeout=90s
 kubectl get pods -l job-name=backoff-job
+kubectl get job backoff-job -o jsonpath='{.status.failed}{" failed, conditions: "}{.status.conditions[*].type}{"  "}{.status.conditions[*].reason}{"\n"}'
 ```
 
-Expect **exactly one pod**, in `Error`, and a failed Job.
+### Observed on the real cluster
+
+```text
+job.batch/backoff-job condition met
+NAME                READY   STATUS   RESTARTS   AGE
+backoff-job-rjwws   0/1     Error    0          6s
+1 failed, conditions: FailureTarget Failed  BackoffLimitExceeded BackoffLimitExceeded
+```
+
+| Item | Predicted | Observed |
+|---|---|---|
+| Pods | Exactly one, in `Error` | **One pod**, `Error`, `RESTARTS 0` |
+| `failed` | 1 | **1** |
+| Conditions | `Failed`, `BackoffLimitExceeded` | `FailureTarget Failed`, both `BackoffLimitExceeded` |
+| Time | A few seconds | The pod was **5 to 6 seconds** old (the run was done twice, with the same result) |
+
+Compare this with Lab 34 (four pods, 78 seconds). The only difference was the limit, and `backoffLimit: 0` means no retry, so there is no back-off wait.
 
 ## Lab 36: `restartPolicy: OnFailure`
+
+The same failing container, but Kubernetes now restarts it **inside the same pod**.
 
 ```bash
 kubectl delete job backoff-job
@@ -1389,12 +1630,64 @@ spec:
         image: busybox
         command: ["sh", "-c", "echo attempt at $(date); exit 1"]
 EOF
-kubectl get pods -l job-name=backoff-job -w
+for i in $(seq 1 60); do
+  echo "$(date -u +%T)  $(kubectl get pods -l job-name=backoff-job --no-headers 2>&1 | awk '{print $1, $3, "restarts="$4}')  job=$(kubectl get job backoff-job -o jsonpath='{.status.conditions[*].type}' 2>&1)"
+  if kubectl get job backoff-job -o jsonpath='{.status.conditions[*].type}' | grep -q Failed; then break; fi
+  sleep 5
+done
+kubectl get pods -l job-name=backoff-job
+kubectl get job backoff-job -o jsonpath='{.status.failed}{" failed, conditions: "}{.status.conditions[*].type}{"  "}{.status.conditions[*].reason}{"\n"}'
+kubectl describe job backoff-job | tail -8
 ```
 
-Expect **one pod** whose `RESTARTS` count climbs, with the container restarting in place at growing intervals. When the limit is hit, the Job fails and the pod is terminated. Compare this with Lab 34, where each attempt was a separate pod.
+The loop stops itself when the Job has failed. `No found restarts=in` in its output is the awk fragment of kubectl's message `No resources found in ...`, so it means the pod is gone.
 
-## Lab 37: a Job that succeeds on a retry
+### Observed on the real cluster
+
+```text
+22:12:08  backoff-job-gxjbc ContainerCreating restarts=0  job=
+22:12:13  backoff-job-gxjbc CrashLoopBackOff restarts=1  job=
+22:12:18  backoff-job-gxjbc CrashLoopBackOff restarts=1  job=
+22:12:23  backoff-job-gxjbc CrashLoopBackOff restarts=1  job=
+22:12:29  backoff-job-gxjbc Error restarts=2  job=
+[... Error and CrashLoopBackOff until 22:12:49 ...]
+22:12:54  No found restarts=in  job=FailureTarget Failed
+
+No resources found in appdesign namespace.
+1 failed, conditions: FailureTarget Failed  BackoffLimitExceeded BackoffLimitExceeded
+
+Events:
+  Normal   SuccessfulCreate      85s   job-controller  Created pod: backoff-job-gxjbc
+  Normal   SuccessfulDelete      43s   job-controller  Deleted pod: backoff-job-gxjbc
+  Warning  BackoffLimitExceeded  42s   job-controller  Job has reached the specified backoff limit
+```
+
+| Observation | Meaning |
+|---|---|
+| **One pod** (`gxjbc`) for the whole run | With `OnFailure`, the container is restarted **inside the same pod**. Lab 34 created four pods |
+| `STATUS` alternates between `Error` and `CrashLoopBackOff` | `Error` is the moment the container has just exited. `CrashLoopBackOff` is the kubelet waiting before the next restart. That wait is the kubelet's own back-off, separate from the Job controller's back-off in Lab 34 |
+| `restarts=1`, then `restarts=2` within about 21 seconds | The restart count climbs within the one pod |
+| The pod was **deleted** when the Job gave up | The events show `SuccessfulDelete` 42 seconds after `SuccessfulCreate`, together with `BackoffLimitExceeded` |
+| `failed` is 1 | One pod was counted as failed in the end |
+
+So the Job gave up after about **42 seconds**, against 78 for the same limit in Lab 34. The samples reach only `restarts=2`. I believe a third restart happened between the last sample and the deletion, since the Job's limit of 3 was reached, but the loop did not catch it, so I can't show it.
+
+In an earlier, interrupted run of the same lab, the `RESTARTS` column once showed `1 (<invalid> ago)`, a display glitch whose cause was not determined.
+
+### The two restart policies compared
+
+| | `restartPolicy: Never` (Lab 34) | `restartPolicy: OnFailure` (Lab 36) |
+|---|---|---|
+| Pods created | 4, one per attempt | **1**, restarted in place |
+| Time until the Job gave up | 78 s | **about 42 s** |
+| After the Job fails | All 4 failed pods **remain**, so you can read their logs | The pod is **deleted**, so its logs are gone |
+| Retry delays | The Job controller's back-off (11, 23, 43 s) | The kubelet's restart back-off |
+
+For debugging, `Never` keeps the evidence, and `OnFailure` throws it away when the Job fails.
+
+## Lab 37: a Job that fails twice and then succeeds
+
+Retries only matter when something can succeed later. This version is deterministic. It keeps an attempt counter in an `emptyDir` volume, which survives **container restarts inside a pod**, and it fails the first two attempts:
 
 ```bash
 kubectl delete job backoff-job
@@ -1407,24 +1700,74 @@ spec:
   backoffLimit: 5
   template:
     spec:
-      restartPolicy: Never
+      restartPolicy: OnFailure
+      volumes:
+      - name: state
+        emptyDir: {}
       containers:
       - name: flaky
         image: busybox
+        volumeMounts:
+        - name: state
+          mountPath: /data
         command:
         - sh
         - -c
         - |
-          if [ $(( $(date +%s) % 2 )) -eq 0 ]; then
-            echo "even second, succeeding"; exit 0
-          else
-            echo "odd second, failing"; exit 1
+          n=$(cat /data/count 2>/dev/null || echo 0)
+          n=$((n+1))
+          echo $n > /data/count
+          echo "attempt $n"
+          if [ $n -lt 3 ]; then
+            echo "failing"
+            exit 1
           fi
+          echo "success"
 EOF
-kubectl get pods -l job-name=flaky-job -w
+for i in $(seq 1 40); do
+  echo "$(date -u +%T)  $(kubectl get pods -l job-name=flaky-job --no-headers 2>&1 | awk '{print $1, $3, "restarts="$4}')  job=$(kubectl get job flaky-job -o jsonpath='{.status.conditions[*].type}')"
+  if kubectl get job flaky-job -o jsonpath='{.status.conditions[*].type}' | grep -q Complete; then break; fi
+  sleep 3
+done
+kubectl get pods -l job-name=flaky-job
+kubectl get job flaky-job
+kubectl logs job/flaky-job
+kubectl logs $(kubectl get pods -l job-name=flaky-job -o name) --previous
 ```
 
-The container succeeds or fails depending on whether the current epoch second is even or odd, so this Job usually finishes after zero to a few failed attempts. Expect `Error` pods followed by one `Completed` pod, and a Job that ends as `Complete`, not `Failed`. Retries only matter when something can succeed later.
+### Observed on the real cluster
+
+```text
+22:54:14  No found restarts=in  job=
+22:54:17  flaky-job-g4tdt Error restarts=0  job=
+22:54:20  flaky-job-g4tdt CrashLoopBackOff restarts=1  job=
+22:54:23  flaky-job-g4tdt CrashLoopBackOff restarts=1  job=
+22:54:26  flaky-job-g4tdt CrashLoopBackOff restarts=1  job=
+22:54:29  flaky-job-g4tdt Completed restarts=2  job=
+22:54:33  flaky-job-g4tdt Completed restarts=2  job=SuccessCriteriaMet Complete
+
+NAME              READY   STATUS      RESTARTS      AGE
+flaky-job-g4tdt   0/1     Completed   2 (21s ago)   23s
+NAME        STATUS     COMPLETIONS   DURATION   AGE
+flaky-job   Complete   1/1           17s        24s
+attempt 3
+success
+unable to retrieve container logs for containerd://2af550264a08...
+```
+
+| Prediction | Observed |
+|---|---|
+| One pod throughout, `RESTARTS` reaching 2 | **One pod**, `restarts=2` |
+| The Job becomes `Complete`, the pod `Completed` and kept | `Complete`, `1/1`, pod `Completed` and still present |
+| About 30 seconds | **17 seconds** (`DURATION`), faster than predicted because the first restarts were quick |
+| `kubectl logs job/flaky-job` shows `attempt 3` and `success` | Exactly that. It shows the **last** container run only |
+| `--previous` shows `attempt 2` and `failing` | **Failed:** `unable to retrieve container logs` |
+
+What the run shows:
+
+- **`attempt 3`** proves the counter file survived the container restarts: the `emptyDir` lives as long as the **pod**. It would **not** survive a pod replacement. With `restartPolicy: Never`, every retry is a new pod with a fresh volume, so every attempt would be "attempt 1" and this Job would never succeed. That variant was not run.
+- **`SuccessCriteriaMet` then `Complete`.** On success the Job shows two conditions, just as failure showed `FailureTarget` then `Failed`. `SuccessCriteriaMet` is the earlier marker, and `Complete` is the final state.
+- **`--previous` failed**, so the earlier container instance was no longer available to the runtime. The kubelet cleans up old exited containers and keeps very few per pod, which would explain it, but this was not confirmed. **Do not count on `--previous` once a Job has finished.** Capture logs while the Job runs, or use `restartPolicy: Never`, which keeps a pod per attempt.
 
 ## Clean up
 
@@ -1596,12 +1939,19 @@ kubectl delete job ttl-job --ignore-not-found
 | Changing a ReplicaSet's image does nothing | A ReplicaSet does not update existing pods | Use a Deployment |
 | A Deployment rollout is stuck | A bad image, a failing readiness probe, or no capacity | `kubectl rollout status`, `kubectl describe pod`, then `kubectl rollout undo` |
 | An update is too slow, or capacity drops | `maxSurge` and `maxUnavailable` do not suit the workload | Tune them (Section 8) |
+| `set image` printed no `image updated` line, and nothing rolled out | The image was already that value, so the pod template did not change | Check the current image with `kubectl get deployment X -o jsonpath='{.spec.template.spec.containers[0].image}'` |
+| A rollout stalls at `N out of 4 new replicas have been updated` and the new pods never become ready | A bad image name (for example `nginx-alpine` instead of `nginx:alpine`), or a failing readiness probe | `kubectl get pods`, `kubectl describe pod`, then fix the image or `kubectl rollout undo`. The old pods keep serving meanwhile |
+| `error: deployment "X" exceeded its progress deadline` | No progress for `progressDeadlineSeconds` (default 600 s). It can still be reported just after you fix the cause | Check `kubectl get rs` and the pods to see where the rollout really stands |
 | The API refuses `maxSurge: 0` with `maxUnavailable: 0` | Both zero means no progress is possible | Set at least one above zero |
 | A DaemonSet has no pod on the master | The control-plane taint is not tolerated | Add the toleration (Lab 24) |
 | `logging: on` in a manifest is refused by the API | YAML reads `on` as the boolean true, and label values must be strings | Quote it (`"on"`) or use another value such as `enabled` |
 | A Job is rejected with `restartPolicy: Always` | Jobs allow only `Never` or `OnFailure` | Change the policy |
 | A Job's pods stay after it finishes | Finished pods are kept for logs | Delete the Job, or set `ttlSecondsAfterFinished` |
 | A hanging Job never fails | `backoffLimit` only counts failures | Add `activeDeadlineSeconds` |
+| `kubectl logs --previous` says `unable to retrieve container logs` | The earlier container instance was no longer available to the runtime (seen after a finished Job, cause not confirmed) | Capture logs while the Job runs, or use `restartPolicy: Never`, which keeps a pod per attempt |
+| A failed Job's pod has disappeared, along with its logs | With `OnFailure`, the Job deletes its pod when it gives up | Use `restartPolicy: Never` when you need to debug failures |
+| A Job using a counter file in `emptyDir` never succeeds with `Never` | Each retry is a new pod with a fresh volume | Use `OnFailure`, or keep state outside the pod |
+| A Job past its `activeDeadlineSeconds` still shows a `Terminating` pod for about 30 seconds | The container ignores the termination signal (for example a shell as the main process), so Kubernetes waits out the default grace period | Handle the signal with `trap`, or lower `terminationGracePeriodSeconds` (Lab 29b) |
 | A CronJob never runs | A bad schedule, `suspend: true`, or a missed `startingDeadlineSeconds` | `kubectl describe cronjob X` and read the events |
 | A CronJob runs at the wrong hour | The schedule is read in the controller's time zone | Set `timeZone` |
 | Overlapping CronJob runs | `concurrencyPolicy: Allow` is the default | Use `Forbid` or `Replace` |
@@ -1686,6 +2036,9 @@ kubectl delete job ttl-job --ignore-not-found
 
 - A Deployment of four nginx pods: its ReplicaSets, its `pod-template-hash` label, rollouts with `rollout restart`, the rollout history and a rollback (revision numbers 1 and 2, then 2 and 3)
 - The default rolling-update pace with 4 replicas: five pods at once mid-rollout, and the `rollout status` messages
+- **Labs 18 to 21** (`maxSurge` and `maxUnavailable`): `maxSurge: 1`, `maxUnavailable: 0` (never below 4 available, 5 total, 51 s), `maxSurge: 0`, `maxUnavailable: 2` (never above 4 total, down to 2 available, 29 s), the percentage settings (a stalled rollout that reached exactly 6 pods with 3 available), and the refusal of both zero
+- **Labs 27 and 29** (Jobs): a Job that completes (`9s`, one `Completed` pod), and a Job that exceeded `activeDeadlineSeconds` (pod terminated at 20 s, `DeadlineExceeded`, about 30 s of `Terminating`)
+- **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
 
@@ -1693,9 +2046,9 @@ kubectl delete job ttl-job --ignore-not-found
 
 - ReplicaSets created directly: self-healing, scaling, relabeling, ownership and the "template change does not update pods" challenge
 - Deployment `Recreate`, pause and resume, and a change-cause annotation
-- Custom `maxSurge` and `maxUnavailable` values, percentages and the both-zero refusal
+- A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
 - A custom DaemonSet: placement, tolerations, node labels and its update
-- All Jobs and CronJobs: parallelism, `activeDeadlineSeconds`, `backoffLimit` with both restart policies, concurrency policies, history limits and TTL
+- Job parallelism (Lab 28), the deadline-beats-retries lab (Lab 30), the fast-stop variant (Lab 29b), CronJobs, concurrency policies, history limits and TTL
 
 For those, the expected behavior in this guide is what the Kubernetes documentation describes, and **not** a captured result from this cluster. Counts such as the number of failed pods for a given `backoffLimit` can vary slightly with timing, so trust what you observe. Check the official Kubernetes documentation for the version you run.
 

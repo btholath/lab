@@ -12,6 +12,9 @@ The full step-by-step guide is in [`docs/`](docs/).
 |---|---|
 | `docs/kubernetes-kubeadm-cluster-guide.md` | Beginner guide (Markdown) |
 | `docs/kubernetes-kubeadm-cluster-guide.docx` | Same guide as a Word document |
+| `docs/kubeadm-upgrade-walkthrough.md` | A real v1.35.9 to v1.36.5 upgrade, with console output and explanations |
+| `docs/kubernetes-services-guide.md` | Services: ClusterIP, NodePort, LoadBalancer, with real console output |
+| `docs/app-design-workload-controllers.md` | Labels and selectors, ReplicaSets, Deployments, DaemonSets, Jobs and CronJobs, with labs |
 | `scripts/create-vms.ps1` | Create the three VMs (Windows PowerShell) |
 | `scripts/common.sh` | Steps 1-3: prepare node, install containerd, kubeadm, kubelet, kubectl |
 | `scripts/setup-common.ps1` | Copy and run `common.sh` on all VMs |
