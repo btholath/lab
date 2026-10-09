@@ -1213,7 +1213,7 @@ Each run creates a Job named `<cronjob-name>-<number>`.
 
 # 13. Implementing Jobs and CronJobs, including `activeDeadlineSeconds`
 
-Labs 27, 29, 31 and 32 were **run on the real cluster**, with their results shown after each lab. The other labs in this section (28, 29b, 30, 33) were not run.
+Labs 27, 28, 29, 30, 31 and 32 were **run on the real cluster**, with their results shown after each lab. The other labs in this section (29b and 33) were not run.
 
 ## Lab 27: a simple Job
 
@@ -1279,10 +1279,36 @@ spec:
         image: busybox
         command: ["sh", "-c", "echo working on $(hostname); sleep 10"]
 EOF
-kubectl get pods -l job-name=batch-job -w
+for i in $(seq 1 14); do
+  echo "$(date -u +%T)  $(kubectl get pods -l job-name=batch-job --no-headers 2>/dev/null | awk '{c[$3]++} END {for (s in c) printf "%s=%d ", s, c[s]}')  job=$(kubectl get job batch-job --no-headers | awk '{print $2, $3}')"
+  sleep 4
+done
 ```
 
-Press Ctrl+C when finished. Expect **two pods at a time**, in three waves, and `COMPLETIONS 6/6` at the end.
+### Observed on the real cluster
+
+```text
+04:50:27  ContainerCreating=2   job=Running 0/6
+04:50:31  Running=2   job=Running 0/6
+04:50:39  Running=2   job=Running 0/6
+04:50:43  ContainerCreating=1 Completed=2   job=Running 1/6
+04:50:47  Running=2 Completed=2   job=Running 2/6
+04:50:55  Running=1 Completed=3   job=Running 2/6
+04:50:59  Running=2 Completed=4   job=Running 4/6
+04:51:08  Running=2 Completed=4   job=Running 4/6
+04:51:12  Completed=6   job=Complete 6/6
+```
+
+| Prediction | Observed |
+|---|---|
+| Never more than 2 pods active at once | Never above 2: every sample has `Running` plus `ContainerCreating` at 2 or fewer |
+| Three waves of two | A **sliding window**, not strict pairs. A replacement pod starts as soon as one finishes |
+| `6/6` and six `Completed` pods | `job=Complete 6/6`, `Completed=6` |
+| About 40 seconds | About **45 seconds** (04:50:27 to 04:51:12) |
+
+At 04:50:43, two pods had completed but the next was still being created, so only one was active for a moment. At 04:50:55, `Running=1 Completed=3` shows one pod of the second pair had already finished.
+
+**The Job's own counter lags the pod states** by up to a few seconds. At 04:50:43 two pods are `Completed` but the Job says `1/6`, and at 04:50:55 three are done but it says `2/6`. Trust the pod states for timing and the Job's counter for the final result.
 
 ## `activeDeadlineSeconds`
 
@@ -1392,9 +1418,59 @@ EOF
 
 With the timeline loop from Lab 29, expect `Terminating` to last only a second or two, and the Job's `Failed` condition to follow almost immediately after the 20-second mark.
 
-## Lab 30: the deadline beats the retries **(not run)**
+## Lab 30: the deadline beats the retries
 
-Take Lab 29 and add `backoffLimit: 10`. The Job still fails after about 20 seconds with `DeadlineExceeded`, even though it had many retries left.
+A Job that fails every time, with plenty of retries left but a short deadline:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: deadline-retries
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 25
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: fail
+        image: busybox
+        command: ["sh", "-c", "echo attempt at $(date); exit 1"]
+EOF
+kubectl wait --for=condition=failed job/deadline-retries --timeout=90s
+kubectl get pods -l job-name=deadline-retries --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,CREATED:.metadata.creationTimestamp
+kubectl get job deadline-retries -o jsonpath='{.status.failed}{" failed, conditions: "}{.status.conditions[*].type}{"  "}{.status.conditions[*].reason}{"\n"}'
+kubectl describe job deadline-retries | tail -12
+```
+
+### Observed on the real cluster
+
+```text
+NAME                     STATUS   CREATED
+deadline-retries-42qrc   Failed   2026-10-09T04:51:40Z
+deadline-retries-dvfs8   Failed   2026-10-09T04:51:45Z
+deadline-retries-ckchp   Failed   2026-10-09T04:51:49Z
+deadline-retries-pbmlb   Failed   2026-10-09T04:51:53Z
+deadline-retries-5wnn4   Failed   2026-10-09T04:51:59Z
+6 failed, conditions: FailureTarget Failed  DeadlineExceeded DeadlineExceeded
+
+Events:
+  Normal   SuccessfulCreate  14m   job-controller  Created pod: deadline-retries-42qrc
+  [... four more SuccessfulCreate ...]
+  Normal   SuccessfulCreate  14m   job-controller  Created pod: deadline-retries-rw6v2
+  Normal   SuccessfulDelete  14m   job-controller  Deleted pod: deadline-retries-rw6v2
+  Warning  DeadlineExceeded  14m   job-controller  Job was active longer than specified deadline
+```
+
+| Result | Meaning |
+|---|---|
+| Final reason **`DeadlineExceeded`**, with only about 6 of 10 retries used | **The deadline ended a Job that still had retries left.** This is what the lab shows |
+| `6 failed`, but five pods listed | A sixth pod, `rw6v2`, was created and then **deleted** when the deadline fired, so it is in the events but not in the pod list |
+| Pods created 4 to 6 seconds apart | **Not normal back-off.** See Section 15, "When retry delays disappear": a node's clock was wrong |
+
+In a cluster whose clocks agree, I would expect about two pods here (the first, and one retry about 11 seconds later), since the next retry would only come about 23 seconds after that. That expectation was not observed.
 
 ## Lab 31: a CronJob every minute
 
@@ -1558,7 +1634,7 @@ Make a Job that outlasts the schedule: `command: ["sh","-c","sleep 100"]` with `
 
 `backoffLimit` is the number of **retries** a Job allows before it gives up and is marked **failed**. The default is **6**.
 
-When a pod fails, the Job controller creates a replacement, but with an **exponential back-off delay**: roughly 10 seconds, then 20, 40, 80 and so on, capped at six minutes. On the real cluster the gaps between pod creations were **11, 23 and 43 seconds** (Lab 34). The delay prevents a broken Job from hammering the cluster.
+When a pod fails, the Job controller creates a replacement, but with an **exponential back-off delay**: roughly 10 seconds, then 20, 40, 80 and so on, capped at six minutes. On the real cluster the gaps between pod creations were **11, 23 and 43 seconds** (Lab 34). This needs the node clocks to agree with the master's: with a node's clock behind, the delays vanished (Section 15). The delay prevents a broken Job from hammering the cluster.
 
 When the limit is reached, the Job gets a `Failed` condition with the reason **`BackoffLimitExceeded`**, and no more pods are created.
 
@@ -1867,6 +1943,103 @@ What the run shows:
 - **`SuccessCriteriaMet` then `Complete`.** On success the Job shows two conditions, just as failure showed `FailureTarget` then `Failed`. `SuccessCriteriaMet` is the earlier marker, and `Complete` is the final state.
 - **`--previous` failed**, so the earlier container instance was no longer available to the runtime. The kubelet cleans up old exited containers and keeps very few per pod, which would explain it, but this was not confirmed. **Do not count on `--previous` once a Job has finished.** Capture logs while the Job runs, or use `restartPolicy: Never`, which keeps a pod per attempt.
 
+## When retry delays disappear: clock skew between nodes
+
+In Lab 30 the retries fired every 4 to 6 seconds, not with the doubling delays of Lab 34. Three further runs on the same day did the same, each with short gaps:
+
+| Run | Settings | Pods | Gaps |
+|---|---|---|---|
+| Experiment 1 | `backoffLimit: 10`, no deadline | 11 | 4, 4, 4, 4, 4, 5, 7, 4, 4, 5 s |
+| Experiment 2 | `backoffLimit: 3`, deadline 120 s | 4 | 5, 4, 4 s |
+| Control | Lab 34's spec, unchanged | 4 | 5, 4, 4 s |
+
+So the Job's settings were not the cause (the control run used exactly Lab 34's spec). A clock check found the cause: **worker2's clock was 43 minutes behind** the others, as measured from Windows:
+
+```text
+master:  VM clock minus Windows clock = -0.5 s
+worker1: VM clock minus Windows clock = -0.7 s
+worker2: VM clock minus Windows clock = -2,580.1 s
+```
+
+All three nodes reported `NTPSynchronized = yes`, so that flag does **not** prove the time is right. A later `timedatectl timesync-status` showed `Poll interval: 8min 32s (min: 32s; max 34min 8s)`, so the time service checks only every 8 to 34 minutes. Why the clock fell behind is unknown. One guess is that the laptop's sleep paused the VMs and stopped their clocks.
+
+### The controlled test
+
+By the time of the tests below, worker2's clock had corrected itself. The same Job was pinned to each node, then to worker2 with its clock deliberately set 10 minutes back:
+
+```bash
+# on the master: a template, and a function that runs it on one node
+cat > /tmp/clock-job.yaml <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: clock-NODE
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: NODE
+      restartPolicy: Never
+      containers:
+      - name: fail
+        image: busybox
+        command: ["sh", "-c", "echo attempt at $(date -u +%T); exit 1"]
+EOF
+run_test() {
+  n=$1
+  sed "s/NODE/$n/g" /tmp/clock-job.yaml | kubectl apply -f -
+  kubectl wait --for=condition=failed job/clock-$n --timeout=200s
+  kubectl get pods -l job-name=clock-$n --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,CREATED:.metadata.creationTimestamp
+  kubectl get pods -l job-name=clock-$n --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{"\n"}{end}' | while read t; do s=$(date -u -d "$t" +%s); [ -n "$prev" ] && echo "gap: $((s-prev))s"; prev=$s; done
+  echo "first pod's own log:"
+  kubectl logs $(kubectl get pods -l job-name=clock-$n --sort-by=.metadata.creationTimestamp -o name | head -1)
+  echo "master clock now: $(date -u +%T)"
+  kubectl delete job clock-$n
+}
+run_test worker2
+run_test worker1
+```
+
+To set a node's clock back (and to **restore it right afterwards**), run these inside that node's shell. This was a deliberate experiment, and must not be left in place:
+
+```bash
+sudo timedatectl set-ntp false
+sudo date -s "10 minutes ago"
+# ... run the test from the master ...
+sudo timedatectl set-ntp true
+sudo systemctl restart systemd-timesyncd
+```
+
+### Observed on the real cluster
+
+| Run | The node's clock | Gaps |
+|---|---|---|
+| `clock-worker2` | Correct: the container logged `05:24:21` for a pod created at `05:24:17` | 14, 21, 41 s |
+| `clock-worker1` | Correct: logged `05:25:38` for a pod created at `05:25:37` | 11, 22, 41 s |
+| `clock-worker2`, clock **10 minutes back** | The container logged `05:20:25` for a pod created at `05:30:24` | **4, 4, 5 s** |
+
+The last two rows are the same node, the same Job and the same cluster, with one change: the clock. With the clock correct, the retries doubled. With the clock 10 minutes behind, the delays disappeared, and the whole Job failed in 13 seconds instead of about 80.
+
+The likeliest mechanism, which was **not verified**, is that the Job controller works out each retry delay from the time the previous pod finished, as stamped by the node's clock, and compares it with the master's clock. A node that is 10 minutes behind makes every finish time look 10 minutes old, so each delay has "already passed". The earlier short-gap runs match this, but I never recorded which nodes they ran on, apart from the control run (worker2).
+
+### What to take away
+
+- **Compare actual clocks, not the NTP flag.** A node can say `NTPSynchronized = yes` while minutes off.
+- **Clock skew shows up in odd places**: retry delays that vanish here, and other time-based behavior (certificate validity, lease timing, log ordering) on a node with a badly wrong clock.
+- **After a laptop sleeps**, check the VM clocks. In PowerShell, this prints each VM's offset from Windows (anything within about a second is noise):
+
+```powershell
+foreach ($vm in "master","worker1","worker2") {
+  $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $r = multipass exec $vm -- date -u +%s.%N
+  $t1 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  "{0}: VM clock minus Windows clock = {1:N1} s" -f $vm, ([double]$r - ($t0+$t1)/2000.0)
+}
+```
+
+- To correct a node, `sudo systemctl restart systemd-timesyncd` inside it, then compare again.
+
 ## Clean up
 
 ```bash
@@ -2097,6 +2270,8 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 | A Job's pods stay after it finishes | Finished pods are kept for logs | Delete the Job, or set `ttlSecondsAfterFinished` |
 | A hanging Job never fails | `backoffLimit` only counts failures | Add `activeDeadlineSeconds` |
 | `kubectl logs --previous` says `unable to retrieve container logs` | The earlier container instance was no longer available to the runtime (seen after a finished Job, cause not confirmed) | Capture logs while the Job runs, or use `restartPolicy: Never`, which keeps a pod per attempt |
+| A failing Job's retries fire every few seconds, with no growing delay | A node's clock is behind the master's, so pod finish times look old (seen with a node 10 and 43 minutes slow) | Compare the clocks (Section 15), then restart `systemd-timesyncd` on the node |
+| `NTPSynchronized` says `yes`, but the time is wrong | The flag reports that the last poll worked, not that the clock is right now | Compare `date -u` on each node with a trusted clock |
 | A failed Job's pod has disappeared, along with its logs | With `OnFailure`, the Job deletes its pod when it gives up | Use `restartPolicy: Never` when you need to debug failures |
 | A Job using a counter file in `emptyDir` never succeeds with `Never` | Each retry is a new pod with a fresh volume | Use `OnFailure`, or keep state outside the pod |
 | A Job past its `activeDeadlineSeconds` still shows a `Terminating` pod for about 30 seconds | The container ignores the termination signal (for example a shell as the main process), so Kubernetes waits out the default grace period | Handle the signal with `trap`, or lower `terminationGracePeriodSeconds` (Lab 29b) |
@@ -2190,6 +2365,7 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - **Labs 18 to 21** (`maxSurge` and `maxUnavailable`): `maxSurge: 1`, `maxUnavailable: 0` (never below 4 available, 5 total, 51 s), `maxSurge: 0`, `maxUnavailable: 2` (never above 4 total, down to 2 available, 29 s), the percentage settings (a stalled rollout that reached exactly 6 pods with 3 available), and the refusal of both zero
 - **Labs 27 and 29** (Jobs): a Job that completes (`9s`, one `Completed` pod), and a Job that exceeded `activeDeadlineSeconds` (pod terminated at 20 s, `DeadlineExceeded`, about 30 s of `Terminating`)
 - **Labs 31, 32, 38, 39 and 40** (CronJobs): a CronJob every minute with Jobs named by the scheduled minute (`tick-29858354` is 23:14 UTC), history capped at 2, a manual run that counted toward the limit, suspend and resume (one Job on resume, none for skipped minutes), a failing CronJob capped at 1 and then 3 (and held at 3 over more than 3 hours), and a Job deleted 30 seconds after finishing by its TTL
+- **Labs 28 and 30** (parallelism and the deadline against retries), and the **clock experiments**: two pods at a time in a sliding window (45 s for six completions), a deadline that ended a Job with retries left, and retry delays that disappeared on a node whose clock was behind (4, 4, 5 s) and returned once it was correct (11 to 21 s, doubling)
 - **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
@@ -2200,7 +2376,7 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - Deployment `Recreate`, pause and resume, and a change-cause annotation
 - A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
 - A custom DaemonSet: placement, tolerations, node labels and its update
-- Job parallelism (Lab 28), the deadline-beats-retries lab (Lab 30), the fast-stop variant (Lab 29b) and concurrency policies (Lab 33)
+- The fast-stop variant (Lab 29b) and concurrency policies (Lab 33)
 
 For those, the expected behavior in this guide is what the Kubernetes documentation describes, and **not** a captured result from this cluster. Counts such as the number of failed pods for a given `backoffLimit` can vary slightly with timing, so trust what you observe. Check the official Kubernetes documentation for the version you run.
 
