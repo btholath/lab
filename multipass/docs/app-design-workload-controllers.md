@@ -184,49 +184,88 @@ The `ROLES` column is simply derived from labels with the `node-role.kubernetes.
 
 # 2. Implementing labels and selectors
 
-## Lab 1: create pods with labels **(not run)**
+Labs 1 to 5 were **run on the real cluster**, with the observed results after each lab. Run them in the `appdesign` namespace, in the master shell.
 
-Run inside the master shell, in the `appdesign` namespace:
+## Lab 1: create pods with labels
 
 ```bash
 kubectl run web1 --image=nginx --labels="app=web,env=prod,tier=frontend"
 kubectl run web2 --image=nginx --labels="app=web,env=staging,tier=frontend"
 kubectl run api1 --image=nginx --labels="app=api,env=prod,tier=backend"
+sleep 10
 kubectl get pods --show-labels
 kubectl get pods -L app,env,tier
 ```
 
 `--show-labels` prints every label in one column. `-L app,env,tier` prints a column per label you name, which is easier to read.
 
-## Lab 2: select with `-l` **(not run)**
+### Observed on the real cluster
 
-By the definitions in Section 1, each selector must match these pods:
+```text
+NAME   READY   STATUS    RESTARTS   AGE   LABELS
+api1   1/1     Running   0          10s   app=api,env=prod,tier=backend
+web1   1/1     Running   0          11s   app=web,env=prod,tier=frontend
+web2   1/1     Running   0          10s   app=web,env=staging,tier=frontend
+NAME   READY   STATUS    RESTARTS   AGE   APP   ENV       TIER
+api1   1/1     Running   0          10s   api   prod      backend
+web1   1/1     Running   0          11s   web   prod      frontend
+web2   1/1     Running   0          10s   web   staging   frontend
+```
 
-| Selector | Matches |
-|---|---|
-| `kubectl get pods -l app=web` | web1, web2 |
-| `kubectl get pods -l env=prod` | web1, api1 |
-| `kubectl get pods -l app=web,env=prod` | web1 |
-| `kubectl get pods -l 'env in (prod,staging)'` | web1, web2, api1 |
-| `kubectl get pods -l 'env!=prod'` | web2 |
-| `kubectl get pods -l 'tier'` | all three (the key exists) |
-| `kubectl get pods -l '!canary'` | all three (none has a `canary` label) |
-| `kubectl get pods -l 'app=web,tier!=backend'` | web1, web2 |
-
-Run each one and compare the result with the table. Quote selectors with parentheses or `!`, so the shell does not interpret them.
-
-## Lab 3: change labels on a live object **(not run)**
+## Lab 2: select with `-l`
 
 ```bash
-kubectl label pod web2 env=prod --overwrite     # change a value
-kubectl label pod web2 release=blue             # add a label
-kubectl label pod web2 release-                 # remove it (trailing minus)
+for sel in 'app=web' 'env=prod' 'app=web,env=prod' 'env in (prod,staging)' 'env!=prod' 'tier' '!canary' 'app=web,tier!=backend'; do
+  echo "-l '$sel'  ->  $(kubectl get pods -l "$sel" --no-headers -o custom-columns=NAME:.metadata.name | tr '\n' ' ')"
+done
+```
+
+Quote selectors that contain parentheses or `!`, so the shell does not interpret them.
+
+### Observed on the real cluster
+
+| Selector | Pods matched |
+|---|---|
+| `app=web` | web1 web2 |
+| `env=prod` | api1 web1 |
+| `app=web,env=prod` | web1 |
+| `env in (prod,staging)` | api1 web1 web2 |
+| `env!=prod` | web2 |
+| `tier` | api1 web1 web2 (the key exists) |
+| `!canary` | api1 web1 web2 (none has a `canary` label) |
+| `app=web,tier!=backend` | web1 web2 |
+
+All eight matched what the definitions in Section 1 predict. The names print in alphabetical order.
+
+## Lab 3: change labels on a live object
+
+```bash
+kubectl label pod web2 env=prod                       # refused
+kubectl label pod web2 env=prod --overwrite           # change a value
+kubectl label pod web2 release=blue                   # add a label
+kubectl get pods -L app,env,release
+kubectl label pod web2 release-                       # remove it (trailing minus)
+kubectl label pod web2 env=staging --overwrite
 kubectl get pods -L app,env,release
 ```
 
-Without `--overwrite`, changing an existing value is refused. The trailing minus removes a label.
+### Observed on the real cluster
 
-## Lab 4: labels on nodes **(not run)**
+```text
+error: 'env' already has a value (staging), and --overwrite is false
+pod/web2 labeled
+pod/web2 labeled
+NAME   READY   STATUS    RESTARTS   AGE   APP   ENV    RELEASE
+api1   1/1     Running   0          11s   api   prod
+web1   1/1     Running   0          12s   web   prod
+web2   1/1     Running   0          11s   web   prod   blue
+pod/web2 unlabeled
+pod/web2 labeled
+```
+
+Changing an existing value without `--overwrite` is **refused**, and the error says why. The trailing minus removes a label (`unlabeled`).
+
+## Lab 4: labels on nodes
 
 ```bash
 kubectl get nodes --show-labels
@@ -235,23 +274,50 @@ kubectl get nodes -l disk=ssd
 kubectl label node worker1 disk-
 ```
 
-Expect `kubernetes.io/hostname` and `kubernetes.io/os=linux` on every node, and `node-role.kubernetes.io/control-plane` on the master.
+### Observed on the real cluster
 
-## Lab 5: act on a selection **(not run)**
+```text
+master    ... kubernetes.io/hostname=master,kubernetes.io/os=linux,node-role.kubernetes.io/control-plane=,node.kubernetes.io/exclude-from-external-load-balancers=
+worker1   ... kubernetes.io/hostname=worker1,kubernetes.io/os=linux,node-role.kubernetes.io/worker=
+worker2   ... kubernetes.io/hostname=worker2,kubernetes.io/os=linux,node-role.kubernetes.io/worker=
 
-Selectors work with most `kubectl` verbs:
+node/worker1 labeled
+NAME      STATUS   ROLES    AGE     VERSION
+worker1   Ready    worker   3d16h   v1.36.5
+node/worker1 unlabeled
+```
+
+Every node has `kubernetes.io/hostname` and `kubernetes.io/os`. The `ROLES` column comes from the `node-role.kubernetes.io/...` labels. The master also carries `node.kubernetes.io/exclude-from-external-load-balancers`. As I understand it, that keeps it out of the pool a cloud load balancer picks from, but its effect here was not checked.
+
+## Lab 5: act on a selection
 
 ```bash
 kubectl get all -l app=web
 kubectl delete pods -l env=staging
+sleep 5
+kubectl get pods
 ```
 
-Check what a selector matches with `get` before you run a `delete` on it.
+### Observed on the real cluster
+
+```text
+NAME       READY   STATUS    RESTARTS   AGE
+pod/web1   1/1     Running   0          12s
+pod/web2   1/1     Running   0          11s
+pod "web2" deleted from appdesign namespace
+NAME   READY   STATUS    RESTARTS   AGE
+api1   1/1     Running   0          19s
+web1   1/1     Running   0          20s
+```
+
+`delete pods -l env=staging` removed **only web2**. `get all` lists the common workload types (pods, Services, Deployments, ReplicaSets, Jobs and so on), but not everything, for example not ConfigMaps or Secrets. Check what a selector matches with `get` before you run a `delete` with it.
 
 ## Clean up the lab pods
 
+**Do not skip this.** The ReplicaSet labs use the selector `app=web`, and a ReplicaSet adopts any pod with no owner whose labels match, so a leftover `web1` would be claimed as one of its replicas.
+
 ```bash
-kubectl delete pod web1 web2 api1
+kubectl delete pod web1 api1 web2 --ignore-not-found
 ```
 
 ---
@@ -323,7 +389,7 @@ A ReplicaSet only keeps a count. It cannot do rolling updates or rollbacks. A **
 
 # 4. Implementing ReplicaSets
 
-All steps **(not run)** on this cluster.
+Labs 6 to 10 were **run on the real cluster**, with the observed results after each lab. Lab 11, the challenge, is in Section 5. Run them in the master shell, in the `appdesign` namespace, with no pods left over from Section 2.
 
 ## Lab 6: create a ReplicaSet
 
@@ -347,60 +413,146 @@ spec:
       - name: nginx
         image: nginx
 EOF
+sleep 8
 kubectl get rs web-rs
 kubectl get pods -l app=web -o wide
 ```
 
-Expect `DESIRED 3`, `CURRENT 3`, and three pods named `web-rs-xxxxx`, spread over the workers (the master's taint keeps pods off it).
+### Observed on the real cluster
+
+```text
+NAME     DESIRED   CURRENT   READY   AGE
+web-rs   3         3         3       8s
+NAME           READY   STATUS    RESTARTS   AGE   IP             NODE
+web-rs-9r699   1/1     Running   0          9s    10.244.2.200   worker2
+web-rs-nlwtd   1/1     Running   0          9s    10.244.2.201   worker2
+web-rs-x8glj   1/1     Running   0          9s    10.244.1.58    worker1
+```
+
+Three pods named `web-rs-xxxxx`, spread over the two workers (two and one), and none on the master, whose taint keeps ordinary pods off it. The spreading is best effort.
 
 ## Lab 7: self-healing
 
 ```bash
-kubectl delete pod <ONE-OF-THE-WEB-RS-PODS>
+P=$(kubectl get pods -l app=web -o name | head -1)
+echo "deleting $P"
+kubectl delete $P
+sleep 5
 kubectl get pods -l app=web
-kubectl describe rs web-rs
+kubectl describe rs web-rs | tail -8
 ```
 
-Replace `<ONE-OF-THE-WEB-RS-PODS>` with a real pod name, brackets included. Expect a replacement within seconds, with a new name. The `Events` at the bottom of `describe rs` show lines like `Created pod: web-rs-...`.
+`$(... | head -1)` picks the first pod for you, so there is nothing to fill in.
+
+### Observed on the real cluster
+
+```text
+deleting pod/web-rs-9r699
+pod "web-rs-9r699" deleted from appdesign namespace
+NAME           READY   STATUS    RESTARTS   AGE
+web-rs-nlwtd   1/1     Running   0          15s
+web-rs-x8glj   1/1     Running   0          15s
+web-rs-zx2rb   1/1     Running   0          6s
+Events:
+  Normal  SuccessfulCreate  15s   replicaset-controller  Created pod: web-rs-9r699
+  Normal  SuccessfulCreate  15s   replicaset-controller  Created pod: web-rs-x8glj
+  Normal  SuccessfulCreate  15s   replicaset-controller  Created pod: web-rs-nlwtd
+  Normal  SuccessfulCreate  6s    replicaset-controller  Created pod: web-rs-zx2rb
+```
+
+The deleted pod was gone within seconds, with no `Terminating` line (nginx stops quickly), and the ReplicaSet created a replacement with a **new name** at once. The four `SuccessfulCreate` events are the original three plus the replacement.
 
 ## Lab 8: scale
 
 ```bash
 kubectl scale rs web-rs --replicas=5
+sleep 6
 kubectl get rs web-rs
+kubectl get pods -l app=web
 kubectl scale rs web-rs --replicas=2
+sleep 8
 kubectl get pods -l app=web
 ```
 
-Scaling up creates pods, and scaling down deletes the surplus.
+### Observed on the real cluster
+
+```text
+(after scaling to 5)
+web-rs   5   5   5   21s
+web-rs-2spll   1/1   Running   0   6s
+web-rs-nlwtd   1/1   Running   0   21s
+web-rs-qqjv2   1/1   Running   0   6s
+web-rs-x8glj   1/1   Running   0   21s
+web-rs-zx2rb   1/1   Running   0   12s
+
+(after scaling to 2)
+web-rs-nlwtd   1/1   Running   0   29s
+web-rs-x8glj   1/1   Running   0   29s
+```
+
+Scaling down removed the three **newest** pods (`zx2rb`, `2spll`, `qqjv2`) and kept the two oldest. That agrees with the documented preference for deleting newer pods first, but it is one run.
 
 ## Lab 9: ownership
 
 ```bash
-kubectl get pod <A-WEB-RS-POD> -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}{"\n"}'
+P=$(kubectl get pods -l app=web -o name | head -1)
+kubectl get $P -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}{"\n"}'
 ```
 
-Expect `ReplicaSet/web-rs`.
+### Observed on the real cluster
+
+```text
+ReplicaSet/web-rs
+```
 
 ## Lab 10: a ReplicaSet follows labels, not pod names
 
-Change a pod's label so it no longer matches:
+Relabel a pod so it no longer matches, then put the label back:
 
 ```bash
-kubectl label pod <A-WEB-RS-POD> app=orphan --overwrite
+kubectl scale rs web-rs --replicas=3
+sleep 5
+P=$(kubectl get pods -l app=web -o name | head -1)
+echo "relabeling $P"
+kubectl label $P app=orphan --overwrite
+sleep 6
 kubectl get pods -L app
+kubectl get rs web-rs
+echo "owner of the relabeled pod: [$(kubectl get $P -o jsonpath='{.metadata.ownerReferences[*].name}')]"
+O=$(kubectl get pods -l app=orphan -o name)
+kubectl label $O app=web --overwrite
+sleep 8
+kubectl get pods -L app
+kubectl get rs web-rs
+echo "owner now: [$(kubectl get $O -o jsonpath='{.metadata.ownerReferences[*].name}' 2>&1)]"
 ```
 
-Expect **one more pod than before**: the ReplicaSet no longer counts the relabeled pod, so it creates a replacement, and the relabeled pod keeps running but is no longer managed. This is a common debugging trick, because it takes a suspect pod out of service and out of any Service's endpoints while keeping it alive to inspect.
+### Observed on the real cluster
 
-Now put the label back:
+```text
+relabeling pod/web-rs-8vph7
+NAME           READY   STATUS    RESTARTS   AGE   APP
+web-rs-8vph7   1/1     Running   0          11s   orphan
+web-rs-nlwtd   1/1     Running   0          66s   web
+web-rs-wjwhf   1/1     Running   0          6s    web
+web-rs-x8glj   1/1     Running   0          66s   web
+web-rs   3   3   3   66s
+owner of the relabeled pod: []
 
-```bash
-kubectl label pod <THE-ORPHAN-POD> app=web --overwrite
-kubectl get pods -L app
+(after relabeling it back to web)
+web-rs-8vph7   1/1   Running   0   20s   web
+web-rs-nlwtd   1/1   Running   0   75s   web
+web-rs-x8glj   1/1   Running   0   75s   web
+web-rs   3   3   3   75s
+owner now: [web-rs]
 ```
 
-The ReplicaSet now sees more pods than desired and deletes the extra ones, so the count returns to `replicas`.
+| Step | What happened |
+|---|---|
+| After `app=orphan` | **Four pods**: the relabeled one and three matching ones, including a brand-new `wjwhf`. The ReplicaSet reports `CURRENT 3`. The orphan's **owner is empty**: the ReplicaSet released it |
+| After relabeling it back | **Three pods** again. The ReplicaSet saw four matching pods and deleted **`wjwhf`, the newest**, not the pod that came back. The returned pod's owner is `web-rs` again: it was **re-adopted** |
+
+Two things to take away. A ReplicaSet owns pods **by their labels**, so a label change takes a pod out of service and out of any Service's endpoints while keeping it alive, which is a useful debugging trick. And the same label match means a stray pod with the right labels is claimed by the ReplicaSet, which is why the cleanup in Section 2 matters.
 
 ---
 
@@ -410,24 +562,44 @@ The ReplicaSet now sees more pods than desired and deletes the extra ones, so th
 
 A ReplicaSet applies its template only to pods it **creates**. If you change the template, for example a new image, **existing pods are left as they are**. You can end up with a mix of old and new pods. There is no rolling update, no rollback, and no history.
 
-## Lab 11: see it **(not run)**
+## Lab 11: see it
 
-Starting from the 2 or 3 pods of `web-rs`:
+Starting from the three pods of `web-rs`:
 
 ```bash
 kubectl set image rs/web-rs nginx=nginx:alpine
+sleep 5
 kubectl get rs web-rs -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 kubectl get pods -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image
-```
-
-The ReplicaSet's template now says `nginx:alpine`, but every existing pod should **still show `nginx`**. Now delete one pod:
-
-```bash
-kubectl delete pod <ONE-OF-THE-WEB-RS-PODS>
+P=$(kubectl get pods -l app=web -o name | head -1)
+kubectl delete $P
+sleep 12
 kubectl get pods -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image
 ```
 
-The replacement should show `nginx:alpine`, while the others stay on `nginx`. You now run **two versions at once**, and the only way to finish the update is to delete the old pods yourself, one at a time or all at once, with downtime if you delete them all.
+### Observed on the real cluster
+
+```text
+replicaset.apps/web-rs image updated
+nginx:alpine
+NAME           IMAGE
+web-rs-8vph7   nginx
+web-rs-nlwtd   nginx
+web-rs-x8glj   nginx
+pod "web-rs-8vph7" deleted from appdesign namespace
+NAME           IMAGE
+web-rs-7cqh7   nginx:alpine
+web-rs-nlwtd   nginx
+web-rs-x8glj   nginx
+```
+
+| Step | Result |
+|---|---|
+| The ReplicaSet's template | `nginx:alpine` |
+| The three existing pods | **All still `nginx`.** The ReplicaSet did not touch them |
+| After deleting one | The replacement `7cqh7` is `nginx:alpine`, while the other two stay on `nginx` |
+
+You now run **two versions at once**, and the only way to finish the update is to delete the old pods yourself, one at a time or all at once, with downtime if you delete them all.
 
 ## All the limitations
 
@@ -2611,6 +2783,8 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 | A Deployment's `selector` cannot be changed | The selector is immutable | Delete and recreate the Deployment |
 | A Service has no endpoints | Its selector matches no ready pods | Compare `kubectl get svc X -o yaml` with `kubectl get pods --show-labels` |
 | A stray pod is claimed by a ReplicaSet | Its labels match the selector | Use more specific labels, or relabel the pod |
+| `kubectl label` fails with `'env' already has a value (staging), and --overwrite is false` | Changing an existing label value needs `--overwrite` | Add `--overwrite` |
+| Relabeling a ReplicaSet's pod makes the ReplicaSet create a new pod | The ReplicaSet counts pods by label, so the relabeled pod no longer counts | Expected. It is a useful way to take a pod out of service while keeping it for inspection |
 | Changing a ReplicaSet's image does nothing | A ReplicaSet does not update existing pods | Use a Deployment |
 | A Deployment rollout is stuck | A bad image, a failing readiness probe, or no capacity | `kubectl rollout status`, `kubectl describe pod`, then `kubectl rollout undo` |
 | An update is too slow, or capacity drops | `maxSurge` and `maxUnavailable` do not suit the workload | Tune them (Section 8) |
@@ -2727,13 +2901,13 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - **Labs 28 and 30** (parallelism and the deadline against retries), and the **clock experiments**: two pods at a time in a sliding window (45 s for six completions), a deadline that ended a Job with retries left, and retry delays that disappeared on a node whose clock was behind (4, 4, 5 s) and returned once it was correct (11 to 21 s, doubling)
 - **Labs 29b and 33**: a pod that handles the termination signal let a deadline Job fail in about 21 s instead of 51 s, and the three concurrency policies (`Allow` overlapped, `Forbid` postponed the missed run and then ran one catch-up Job, `Replace` deleted each Job after 60 s so none completed)
 - **Labs 23 to 26** (DaemonSets): no toleration (2 pods, none on the master), flannel and kube-proxy tolerations, a toleration added (3 pods, the workers' pods replaced), a node label controlling placement (1, 2, then 1 pod, reacting within seconds), and a rolling image update (one node at a time, about 31 s per node, 4 revisions in the history)
+- **Labs 1 to 11** (labels and ReplicaSets): labeled pods and eight selectors, the refusal to change a label without `--overwrite`, node labels, a ReplicaSet that healed itself, scaled down by removing the newest pods, released and re-adopted a pod by its labels, and left two image versions running after a template change
 - **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
 
 ## Not run (every lab marked **(not run)**)
 
-- ReplicaSets created directly: self-healing, scaling, relabeling, ownership and the "template change does not update pods" challenge
 - Deployment `Recreate`, pause and resume, and a change-cause annotation
 - A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
 
