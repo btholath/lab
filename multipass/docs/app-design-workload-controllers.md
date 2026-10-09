@@ -1213,7 +1213,7 @@ Each run creates a Job named `<cronjob-name>-<number>`.
 
 # 13. Implementing Jobs and CronJobs, including `activeDeadlineSeconds`
 
-Labs 27 and 29 were **run on the real cluster**, with their results shown after each lab. The other labs in this section were not run.
+Labs 27, 29, 31 and 32 were **run on the real cluster**, with their results shown after each lab. The other labs in this section (28, 29b, 30, 33) were not run.
 
 ## Lab 27: a simple Job
 
@@ -1398,6 +1398,8 @@ Take Lab 29 and add `backoffLimit: 10`. The Job still fails after about 20 secon
 
 ## Lab 31: a CronJob every minute
 
+As run, this lab also set the history limits that Section 16 explains.
+
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
@@ -1407,6 +1409,8 @@ metadata:
 spec:
   schedule: "*/1 * * * *"
   concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
       backoffLimit: 0
@@ -1417,21 +1421,63 @@ spec:
           containers:
           - name: tick
             image: busybox
-            command: ["sh", "-c", "date; echo tick"]
+            command: ["sh", "-c", "date -u; echo tick"]
 EOF
 kubectl get cronjob tick
-kubectl get jobs -w
+for i in $(seq 1 22); do
+  echo "$(date -u +%T)  $(kubectl get jobs --no-headers 2>&1 | awk '{printf "%s(%s) ", $1, $2}')"
+  sleep 15
+done
 ```
 
-Wait about two minutes, then press Ctrl+C. Expect a new Job named `tick-<number>` **each minute**, each running one pod that completes. `kubectl get cronjob tick` shows `LAST SCHEDULE` and `ACTIVE`.
+Keep the laptop awake while the loop runs (about five and a half minutes). Right after the apply there is no Job: a CronJob creates its first one at the **next minute boundary**. Afterwards:
 
 ```bash
-kubectl logs job/<ONE-OF-THE-TICK-JOBS>
+kubectl get cronjob tick
+kubectl get jobs
+kubectl get pods
+kubectl logs job/$(kubectl get jobs --no-headers -o custom-columns=NAME:.metadata.name | tail -1)
+kubectl get cronjob tick -o jsonpath='{.status.lastScheduleTime}{"\n"}'
 ```
 
-Replace `<ONE-OF-THE-TICK-JOBS>` with a real Job name, brackets included.
+### Observed on the real cluster
 
-## Lab 32: run a CronJob right now, and pause it
+```text
+NAME   SCHEDULE      TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+tick   */1 * * * *   <none>     False     0        40s             49s
+NAME            STATUS     COMPLETIONS   DURATION   AGE
+tick-29858354   Complete   1/1           5s         40s
+NAME                  READY   STATUS      RESTARTS   AGE
+tick-29858354-rwnvk   0/1     Completed   0          40s
+Thu Oct  8 23:14:02 UTC 2026
+tick
+2026-10-08T23:14:00Z
+```
+
+The timeline (every 15 seconds):
+
+```text
+23:13:55  No(resources)
+23:14:10  tick-29858354(Complete)
+23:15:10  tick-29858354(Complete) tick-29858355(Complete)
+23:16:11  tick-29858355(Complete) tick-29858356(Complete)
+23:17:11  tick-29858356(Complete) tick-29858357(Complete)
+23:18:11  tick-29858357(Complete) tick-29858358(Complete)
+```
+
+| Prediction | Observed |
+|---|---|
+| The first Job appears at a minute boundary | `lastScheduleTime` **23:14:00Z**, about 9 seconds after the CronJob was created |
+| Names rise by 1 every minute | `…354`, `…355`, `…356`, `…357`, `…358` |
+| 1 Job, then 2, then it stays at 2 | Exactly that: 1 at 23:14, 2 at 23:15, and 2 from then on |
+| Two pods, both `Completed` | Yes, and the pods of pruned Jobs were gone |
+| One line of UTC time plus `tick` | `Thu Oct 8 23:14:02 UTC 2026` and `tick`, two seconds after the schedule |
+
+**The number in a Job's name is the scheduled time in minutes since 1970.** `29858354 × 60` seconds is exactly 2026-10-08 23:14:00 UTC, and the other numbers match their minutes the same way. So a CronJob's Job name carries its own timestamp.
+
+`DURATION 5s` for a command that takes milliseconds is mostly pod start-up time.
+
+## Lab 32: run a CronJob now, pause it, and resume it
 
 ```bash
 kubectl create job manual-run --from=cronjob/tick
@@ -1440,7 +1486,59 @@ kubectl patch cronjob tick -p '{"spec":{"suspend":true}}'
 kubectl get cronjob tick
 ```
 
-`--from=cronjob/...` creates a Job from the CronJob's template without waiting for the schedule. After `suspend: true`, the `SUSPEND` column shows `True`, and no new Jobs appear. Resume with `"suspend":false`.
+Wait about two and a half minutes (`sleep 150`), then look again with `kubectl get jobs` and `kubectl get cronjob tick`. `--from=cronjob/...` creates a Job from the CronJob's template without waiting for the schedule.
+
+### Observed on the real cluster
+
+```text
+job.batch/manual-run created
+NAME            STATUS     COMPLETIONS   DURATION   AGE
+manual-run      Running    0/1           0s         0s
+tick-29858358   Complete   1/1           5s         2m3s
+tick-29858359   Complete   1/1           4s         63s
+tick-29858360   Running    0/1           3s         3s
+cronjob.batch/tick patched
+NAME   SCHEDULE      TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+tick   */1 * * * *   <none>     True      1        3s              6m12s
+
+(150 seconds later)
+NAME            STATUS     COMPLETIONS   DURATION   AGE
+manual-run      Complete   1/1           9s         3m14s
+tick-29858360   Complete   1/1           5s         3m17s
+NAME   SCHEDULE      TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+tick   */1 * * * *   <none>     True      0        3m17s           9m26s
+```
+
+| Observation | Meaning |
+|---|---|
+| `manual-run` started at once, with a plain name | The template ran immediately |
+| `SUSPEND True`, and `ACTIVE 1` straight away | Suspending does **not** stop a Job that has already started. `tick-29858360` finished by itself |
+| No new `tick-…` Jobs after 150 seconds | While suspended, no runs are created, though several minute boundaries passed |
+| `manual-run` stayed, but `tick-29858358` and `…359` were **pruned** | The manual Job **counted toward the CronJob's history limit of 2**. Running Jobs are not counted, only finished ones |
+| `manual-run` was **deleted with the CronJob** (shown when the CronJob was deleted next) | The Job created with `--from=cronjob/…` is owned by the CronJob. That ownership explains both rows above. The owner reference itself was not inspected |
+
+`ACTIVE` showed 1 while two Jobs (`tick-29858360` and `manual-run`) were running. Whether a manually created Job is counted there, or the count was a moment late, is unknown.
+
+### Resuming: one run, not one per missed minute
+
+This was run on the failing CronJob from Lab 39, whose history limit was 3 at the time. It was suspended for 150 seconds, and then resumed:
+
+```text
+(suspended; Jobs listed:)  tick-fail-29858586  tick-fail-29858587  tick-fail-29858588
+(150 s later, unchanged:)  tick-fail-29858586  tick-fail-29858587  tick-fail-29858588
+03:11:24                   <- time of the resume
+(15 s after the resume:)   tick-fail-29858587  tick-fail-29858588  tick-fail-29858591
+NAME        SCHEDULE      TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+tick-fail   */1 * * * *   <none>     False     0        40s             3h35m
+```
+
+| Prediction | Observed |
+|---|---|
+| While suspended, the list doesn't change | Unchanged |
+| After the resume, **exactly one** new Job for the latest minute | One new Job, `…591`, which is 03:11:00 UTC. Nothing for `…589` (03:09) or `…590` (03:10) |
+| The normal schedule continues | `LAST SCHEDULE 40s`, so recent again |
+
+The skipped minutes are simply lost, which is the right behavior for most scheduled jobs.
 
 ## Lab 33: concurrency policies
 
@@ -1808,44 +1906,39 @@ spec:
 | `ttlSecondsAfterFinished` | Any Job (also usable inside a CronJob's `jobTemplate`) | Delete one Job a set time after it finishes |
 | `revisionHistoryLimit` | Deployment | How many old ReplicaSets are kept for rollback. The same idea, for a different object |
 
-These limits only trim **finished** Jobs. A Job that is still running is never removed by them.
+These limits only trim **finished** Jobs. A Job that is still running is never removed by them. A Job created by hand with `kubectl create job --from=cronjob/NAME` is owned by the CronJob, so it **counts toward the limits** too (Lab 32).
 
-## Lab 38: watch the history being pruned **(not run)**
+## Lab 38: watch the history being pruned
 
-Use the CronJob from Lab 31 with explicit limits:
-
-```bash
-kubectl apply -f - <<'EOF'
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: tick
-spec:
-  schedule: "*/1 * * * *"
-  successfulJobsHistoryLimit: 2
-  failedJobsHistoryLimit: 1
-  jobTemplate:
-    spec:
-      backoffLimit: 0
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-          - name: tick
-            image: busybox
-            command: ["sh", "-c", "date; echo tick"]
-EOF
-kubectl get jobs -w
-```
-
-Watch for four or five minutes, then press Ctrl+C. **Expect that at most two finished Jobs** from this CronJob are ever listed. Each time a third completes, the oldest disappears, and so do its pods:
+This lab was run together with Lab 31, which used `successfulJobsHistoryLimit: 2` and `failedJobsHistoryLimit: 1`. If you ran Lab 31, you have already done it. Otherwise, apply the CronJob from Lab 31 and watch:
 
 ```bash
+for i in $(seq 1 22); do
+  echo "$(date -u +%T)  $(kubectl get jobs --no-headers 2>&1 | awk '{printf "%s(%s) ", $1, $2}')"
+  sleep 15
+done
 kubectl get jobs
 kubectl get pods
 ```
 
-## Lab 39: the failed history **(not run)**
+### Observed on the real cluster
+
+```text
+23:14:10  tick-29858354(Complete)
+23:15:10  tick-29858354(Complete) tick-29858355(Complete)
+23:16:11  tick-29858355(Complete) tick-29858356(Complete)       <- 354 pruned
+23:17:11  tick-29858356(Complete) tick-29858357(Complete)       <- 355 pruned
+23:18:11  tick-29858357(Complete) tick-29858358(Complete)       <- 356 pruned
+```
+
+| Prediction | Observed |
+|---|---|
+| At most two finished Jobs are ever listed | **Two**, in every sample. Each time a third completed, the oldest disappeared |
+| The pods of pruned Jobs go too | Only two pods existed at the end |
+
+If there was ever a moment with three, it was shorter than the 15-second sampling interval.
+
+## Lab 39: the failed history, and changing the limit
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -1868,12 +1961,47 @@ spec:
             image: busybox
             command: ["sh", "-c", "echo failing; exit 1"]
 EOF
-kubectl get jobs -w
+for i in $(seq 1 22); do
+  echo "$(date -u +%T)  $(kubectl get jobs --no-headers 2>&1 | awk '{printf "%s(%s) ", $1, $2}')"
+  sleep 15
+done
 ```
 
-After a few minutes, expect only **one** failed Job `tick-fail-<number>` to remain (the newest), however many runs have failed. Change `failedJobsHistoryLimit` to `3` with `kubectl patch cronjob tick-fail -p '{"spec":{"failedJobsHistoryLimit":3}}'` and expect up to three to accumulate.
+While the loop is running, raise the limit from a second shell:
 
-## Lab 40: delete a Job by TTL **(not run)**
+```bash
+kubectl patch cronjob tick-fail -p '{"spec":{"failedJobsHistoryLimit":3}}'
+```
+
+### Observed on the real cluster
+
+The patch ran at about 23:37:23, partway through the loop, so the timeline holds both settings:
+
+| Time (UTC) | Failed Jobs listed | Limit at the time |
+|---|---|---|
+| 23:36:11 | `…376` | 1 |
+| 23:37:12 | `…377` only | 1: `…376` was **pruned** when `…377` appeared |
+| 23:38:12 | `…377`, `…378` | 3, after the patch: the history **grows** |
+| 23:39:12 | `…377`, `…378`, `…379` | 3 |
+| 23:40:13 | `…378`, `…379`, `…380` | 3: `…377` pruned, the history is **capped** at three |
+| 23:41:13 | `…379`, `…380`, `…381` | 3 |
+
+| Prediction | Observed |
+|---|---|
+| A new Job each minute, failing within seconds | Yes. Each is `Failed`, `0/1` completions |
+| Exactly **one** failed Job kept at limit 1 | Yes |
+| The CronJob keeps scheduling after failures | Yes. `ACTIVE 0`, and `LAST SCHEDULE` stayed recent |
+| Up to **3** after raising the limit | Yes: 2 at 23:38, 3 at 23:39, and stable at 3 |
+
+A failed Job's `DURATION` equals its `AGE` and keeps growing (`2m43s`, `103s`, `43s`), whereas successful Jobs showed a fixed 4 or 5 seconds. My guess is that a failed Job has no completion time to stop the clock, which was not verified.
+
+### The limit over hours
+
+The same CronJob was left running for **3 hours 35 minutes**. Its Job numbers rose from `…376` to `…588` (the scheduled minutes), meaning it kept creating a failing Job every minute throughout. Yet at any sample, only **three** Jobs existed. That is more than 200 failed Jobs created, and a history limit of 3 kept the cluster from filling with them. Left running with no limit at all, they would have piled up.
+
+Also, resuming from a suspension created one Job (see Lab 32), and the cap of 3 held.
+
+## Lab 40: delete a Job by TTL
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -1891,10 +2019,28 @@ spec:
         image: busybox
         command: ["sh", "-c", "echo bye"]
 EOF
-kubectl get jobs -w
+for i in $(seq 1 14); do echo "$(date -u +%T)  $(kubectl get job ttl-job --no-headers 2>&1 | awk '{print $1, $2}')  pods=$(kubectl get pods -l job-name=ttl-job --no-headers 2>&1 | awk '{print $3}')"; sleep 5; done
 ```
 
-Expect the Job to complete, and then **disappear about 30 seconds later**, with its pod. This is the tool for standalone Jobs, because the history limits only apply to Jobs created by a CronJob.
+### Observed on the real cluster
+
+```text
+03:20:32  ttl-job Running  pods=ContainerCreating
+03:20:37  ttl-job Running  pods=Completed
+03:20:43  ttl-job Complete  pods=Completed
+[... Complete until 03:21:08 ...]
+03:21:13  Error from  pods=found
+```
+
+| Prediction | Observed |
+|---|---|
+| The Job finishes within about 8 seconds | `Complete` by 03:20:43, with the pod `Completed` at 03:20:37 |
+| It stays for **30 seconds** after finishing | Still present at 03:21:08, about 30 seconds after it finished |
+| It disappears **with its pod**, about 40 to 45 seconds after creation | Gone at 03:21:13, about **42 seconds** after creation. The pods column emptied at the same moment |
+
+`Error from  pods=found` is awk's fragment of kubectl's two messages: `Error from server (NotFound)` for the Job, and `No resources found` for the pods. Both were gone.
+
+This is the tool for standalone Jobs, since the history limits above apply only to Jobs created by a CronJob.
 
 ## Clean up
 
@@ -1902,6 +2048,8 @@ Expect the Job to complete, and then **disappear about 30 seconds later**, with 
 kubectl delete cronjob tick tick-fail --ignore-not-found
 kubectl delete job ttl-job --ignore-not-found
 ```
+
+Deleting a CronJob also deletes its Jobs, including a manual one created with `--from=cronjob/...`, and their pods.
 
 ---
 
@@ -1956,6 +2104,9 @@ kubectl delete job ttl-job --ignore-not-found
 | A CronJob runs at the wrong hour | The schedule is read in the controller's time zone | Set `timeZone` |
 | Overlapping CronJob runs | `concurrencyPolicy: Allow` is the default | Use `Forbid` or `Replace` |
 | Old Jobs pile up | No history limits, or limits set high | Set `successfulJobsHistoryLimit` and `failedJobsHistoryLimit` |
+| A suspended CronJob still has a running Job | Suspending stops **new** runs only. A Job that has already started finishes | Delete the Job if you need it stopped |
+| A resumed CronJob did not run the minutes it missed | By design: it creates **one** Job for the latest scheduled minute | Run `kubectl create job NAME --from=cronjob/CRON` if you need an extra run |
+| A manual `--from=cronjob/...` Job disappeared | It is owned by the CronJob, so it counts toward the history limit and is deleted with the CronJob | Copy the Job's YAML into its own Job if it must outlive the CronJob |
 | `connection refused` to `127.0.0.1` from Windows | Plain `kubectl` in PowerShell talks to a different cluster | Use `multipass exec master -- kubectl ...`, or work inside the master shell |
 
 ---
@@ -2038,6 +2189,7 @@ kubectl delete job ttl-job --ignore-not-found
 - The default rolling-update pace with 4 replicas: five pods at once mid-rollout, and the `rollout status` messages
 - **Labs 18 to 21** (`maxSurge` and `maxUnavailable`): `maxSurge: 1`, `maxUnavailable: 0` (never below 4 available, 5 total, 51 s), `maxSurge: 0`, `maxUnavailable: 2` (never above 4 total, down to 2 available, 29 s), the percentage settings (a stalled rollout that reached exactly 6 pods with 3 available), and the refusal of both zero
 - **Labs 27 and 29** (Jobs): a Job that completes (`9s`, one `Completed` pod), and a Job that exceeded `activeDeadlineSeconds` (pod terminated at 20 s, `DeadlineExceeded`, about 30 s of `Terminating`)
+- **Labs 31, 32, 38, 39 and 40** (CronJobs): a CronJob every minute with Jobs named by the scheduled minute (`tick-29858354` is 23:14 UTC), history capped at 2, a manual run that counted toward the limit, suspend and resume (one Job on resume, none for skipped minutes), a failing CronJob capped at 1 and then 3 (and held at 3 over more than 3 hours), and a Job deleted 30 seconds after finishing by its TTL
 - **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
@@ -2048,7 +2200,7 @@ kubectl delete job ttl-job --ignore-not-found
 - Deployment `Recreate`, pause and resume, and a change-cause annotation
 - A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
 - A custom DaemonSet: placement, tolerations, node labels and its update
-- Job parallelism (Lab 28), the deadline-beats-retries lab (Lab 30), the fast-stop variant (Lab 29b), CronJobs, concurrency policies, history limits and TTL
+- Job parallelism (Lab 28), the deadline-beats-retries lab (Lab 30), the fast-stop variant (Lab 29b) and concurrency policies (Lab 33)
 
 For those, the expected behavior in this guide is what the Kubernetes documentation describes, and **not** a captured result from this cluster. Counts such as the number of failed pods for a given `backoffLimit` can vary slightly with timing, so trust what you observe. Check the official Kubernetes documentation for the version you run.
 
