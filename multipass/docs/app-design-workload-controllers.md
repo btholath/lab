@@ -1201,7 +1201,7 @@ Set `timeZone` (for example `timeZone: "America/Los_Angeles"`) so the schedule d
 |---|---|---|
 | `schedule` | required | The cron expression |
 | `timeZone` | the controller's zone | The zone the schedule is read in |
-| `concurrencyPolicy` | `Allow` | `Allow` runs overlapping Jobs, `Forbid` skips a run if the last is still going, `Replace` stops the old one and starts the new |
+| `concurrencyPolicy` | `Allow` | `Allow` runs overlapping Jobs. `Forbid` never overlaps: a run that falls during an active Job is **postponed** until it ends, then one catch-up run starts. `Replace` deletes the running Job and starts the new one (Lab 33) |
 | `startingDeadlineSeconds` | none | How late a run may start before it is counted as missed |
 | `suspend` | false | Pause the schedule without deleting it |
 | `successfulJobsHistoryLimit` | 3 | Finished successful Jobs to keep (Section 16) |
@@ -1213,7 +1213,7 @@ Each run creates a Job named `<cronjob-name>-<number>`.
 
 # 13. Implementing Jobs and CronJobs, including `activeDeadlineSeconds`
 
-Labs 27, 28, 29, 30, 31 and 32 were **run on the real cluster**, with their results shown after each lab. The other labs in this section (29b and 33) were not run.
+All the labs in this section (27 to 33, including 29b) were **run on the real cluster**, with their results shown after each lab.
 
 ## Lab 27: a simple Job
 
@@ -1390,18 +1390,16 @@ Events:
 
 So the deadline is enforced on time (20 s), but **a Job takes as long as its slowest pod takes to stop**.
 
-## Lab 29b: end the pod quickly **(not run)**
+## Lab 29b: end the pod quickly
 
-Two ways to avoid the 30-second wait. Delete the finished Job first (`kubectl delete job deadline-job`), then try either.
-
-**Handle the signal**, so the shell exits at once:
+In Lab 29 the pod sat in `Terminating` for about 30 seconds after the deadline. This lab tests the explanation: the same Job, but the shell **handles the termination signal**, so the container exits at once.
 
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: deadline-job
+  name: deadline-fast
 spec:
   activeDeadlineSeconds: 20
   template:
@@ -1412,11 +1410,46 @@ spec:
         image: busybox
         command: ["sh", "-c", "trap 'exit 0' TERM; echo start; sleep 300 & wait"]
 EOF
+for i in $(seq 1 24); do echo "$(date -u +%T)  $(kubectl get pods -l job-name=deadline-fast --no-headers 2>&1 | awk '{print $1, $3}')"; sleep 3; done
+kubectl get job deadline-fast -o jsonpath='{range .status.conditions[*]}{.type}{"  "}{.lastTransitionTime}{"\n"}{end}'
+kubectl describe job deadline-fast | tail -6
 ```
 
-**Or shorten the grace period** by adding `terminationGracePeriodSeconds: 2` under the pod's `spec` (next to `restartPolicy`).
+An alternative is to leave the command alone and add `terminationGracePeriodSeconds: 2` under the pod's `spec`, next to `restartPolicy` (not run).
 
-With the timeline loop from Lab 29, expect `Terminating` to last only a second or two, and the Job's `Failed` condition to follow almost immediately after the 20-second mark.
+### Observed on the real cluster
+
+```text
+05:40:59  deadline-fast-6w2q2 ContainerCreating
+05:41:02  deadline-fast-6w2q2 ContainerCreating
+05:41:05  deadline-fast-6w2q2 Running
+[... Running until 05:41:17 ...]
+05:41:20  No found
+
+FailureTarget  2026-10-09T05:41:19Z
+Failed  2026-10-09T05:41:20Z
+
+Events:
+  Normal   SuccessfulCreate  64s   job-controller  Created pod: deadline-fast-6w2q2
+  Normal   SuccessfulDelete  44s   job-controller  Deleted pod: deadline-fast-6w2q2
+  Warning  DeadlineExceeded  43s   job-controller  Job was active longer than specified deadline
+```
+
+| | Lab 29 (no signal handler) | Lab 29b (`trap 'exit 0' TERM`) |
+|---|---|---|
+| The Job decides to fail (`FailureTarget`) | at 20 s | at 20 s |
+| Pod in `Terminating` | **about 30 s** | **never seen** in a 3-second sample, so under 3 s |
+| `FailureTarget` to `Failed` | **31 s** | **1 s** |
+| `DeadlineExceeded` event, counted from pod creation | about 51 s | **21 s** |
+
+With a signal handler, the Job went from started to finally failed in about 21 seconds, against about 51 without one. The pod's slowness to stop was the whole difference, and the Job's `Failed` state does wait for it.
+
+Two details:
+
+- The pod was `Running` for only about 14 seconds. The deadline counts from the **Job's** start, and about 6 seconds went on `ContainerCreating`.
+- The pod exited with status 0 when asked to stop, yet the Job still ended `Failed`. A tidy exit during termination does not rescue a Job whose deadline had passed.
+
+The usual explanation, consistent with this result but not verified by inspecting signals, is that a container's main process ignores the termination signal unless it installs a handler. Kubernetes then waits out the grace period (30 seconds by default) and kills it. This also slows drains and rolling updates for applications that do not handle the signal. Handle it, or lower `terminationGracePeriodSeconds`.
 
 ## Lab 30: the deadline beats the retries
 
@@ -1618,13 +1651,120 @@ The skipped minutes are simply lost, which is the right behavior for most schedu
 
 ## Lab 33: concurrency policies
 
-Make a Job that outlasts the schedule: `command: ["sh","-c","sleep 100"]` with `* * * * *` (and a long enough `activeDeadlineSeconds`). Then compare:
+A CronJob fires every minute, but each Job runs for about 100 seconds, so the runs overlap. The three policies handle that differently.
 
-| `concurrencyPolicy` | Expected behavior |
+```bash
+cat > /tmp/conc.yaml <<'EOF'
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: conc-NAME
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: POLICY
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 150
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: long
+            image: busybox
+            command: ["sh", "-c", "trap 'exit 0' TERM; echo start $(date -u +%T); sleep 100 & wait"]
+EOF
+run_policy() {
+  p=$1
+  l=$(echo $p | tr 'A-Z' 'a-z')
+  sed "s/POLICY/$p/g; s/NAME/$l/g" /tmp/conc.yaml | kubectl apply -f -
+  for i in $(seq 1 18); do
+    echo "$(date -u +%T)  $(kubectl get jobs --no-headers 2>&1 | awk '{printf "%s(%s) ", $1, $2}') active=$(kubectl get cronjob conc-$l -o jsonpath='{.status.active[*].name}' | wc -w)"
+    sleep 15
+  done
+  kubectl describe cronjob conc-$l | tail -10
+  kubectl delete cronjob conc-$l
+}
+run_policy Allow
+run_policy Forbid
+run_policy Replace
+```
+
+Each policy takes 4.5 minutes, so keep the laptop awake and do not interrupt the loop. The function replaces `POLICY` and `NAME` in the template, using a lowercase name because CronJob names cannot contain capitals.
+
+### Observed on the real cluster: Allow
+
+```text
+05:45:08  conc-allow-29858745(Running)  active=1
+05:46:08  conc-allow-29858745(Running) conc-allow-29858746(Running)  active=2
+05:46:53  conc-allow-29858745(Complete) conc-allow-29858746(Running)  active=1
+05:47:08  conc-allow-29858745(Complete) conc-allow-29858746(Running) conc-allow-29858747(Running)  active=2
+05:47:54  conc-allow-29858745(Complete) conc-allow-29858746(Complete) conc-allow-29858747(Running)  active=1
+05:48:09  [... 747 and 748 Running ...]  active=2
+```
+
+A new Job started **every minute**, whether or not the previous one had finished, and `active` alternated between 2 and 1. Each Job lasted about 100 to 110 seconds against a 60-second schedule, so the overlap never went away.
+
+### Observed on the real cluster: Forbid
+
+```text
+06:58:09  conc-forbid-29858818(Running)  active=1
+06:59:40  conc-forbid-29858818(Running)  active=1
+06:59:55  conc-forbid-29858818(Complete) conc-forbid-29858819(Running)  active=1
+07:01:26  conc-forbid-29858818(Complete) conc-forbid-29858819(Running)  active=1
+07:01:41  conc-forbid-29858818(Complete) conc-forbid-29858819(Complete) conc-forbid-29858821(Running)  active=1
+
+Events:
+  Normal  SuccessfulCreate  3m56s                cronjob-controller  Created job conc-forbid-29858818
+  Normal  SawCompletedJob   2m11s                cronjob-controller  Saw completed job: conc-forbid-29858818, condition: Complete
+  Normal  SuccessfulCreate  2m11s                cronjob-controller  Created job conc-forbid-29858819
+  Normal  JobAlreadyActive  27s (x7 over 2m56s)  cronjob-controller  Not starting job because prior execution is running and concurrency policy is Forbid
+  Normal  SawCompletedJob   27s                  cronjob-controller  Saw completed job: conc-forbid-29858819, condition: Complete
+  Normal  SuccessfulCreate  27s                  cronjob-controller  Created job conc-forbid-29858821
+```
+
+| Observation | Meaning |
 |---|---|
-| `Allow` | A new Job starts every minute, so several run at once |
-| `Forbid` | The next run is **skipped** while the previous Job is still running |
-| `Replace` | The running Job is stopped and replaced by the new one |
+| `active` never exceeded 1 | No overlap, as `Forbid` promises |
+| `…819` (the **06:59** run) started at about 06:59:46, right after `…818` finished, **46 seconds late** | `Forbid` did **not** discard the missed run. It postponed it until the previous Job ended |
+| `…821` (the **07:01** run) started right after `…819` finished. **`…820` never ran** | Two boundaries (07:00 and 07:01) were missed during `…819`, and only **one** catch-up Job ran, for the latest one |
+| `JobAlreadyActive (x7 over 2m56s)` | The controller re-checked seven times and found the prior Job still running each time |
+| `SawCompletedJob` and `SuccessfulCreate` at the same instant | A new run starts the moment the previous Job completes |
+
+I had predicted that a run falling during an active Job would simply be **skipped**, with a new Job only every two minutes. That was wrong. The effective rate was about one Job per Job duration (about 105 seconds), and the gap in the Job numbers appeared only where several boundaries had been missed at once (`…819` to `…821`). This matches the resume result in Lab 32, where a suspended CronJob created **one** Job for the latest minute: missed runs seem to collapse into a single catch-up run for the latest scheduled time. Whether a very late run is dropped depends on `startingDeadlineSeconds`, which was not tested.
+
+### Observed on the real cluster: Replace
+
+```text
+07:02:11  conc-replace-29858822(Running)  active=1
+07:03:12  conc-replace-29858823(Running)  active=1
+07:04:12  conc-replace-29858824(Running)  active=1
+07:05:13  conc-replace-29858825(Running)  active=1
+07:06:13  conc-replace-29858826(Running)  active=1
+
+Events:
+  Normal  SuccessfulCreate  4m28s  cronjob-controller  Created job conc-replace-29858822
+  Normal  SuccessfulDelete  3m28s  cronjob-controller  Deleted job conc-replace-29858822
+  Normal  SuccessfulCreate  3m28s  cronjob-controller  Created job conc-replace-29858823
+  Normal  SuccessfulDelete  2m28s  cronjob-controller  Deleted job conc-replace-29858823
+```
+
+| Observation | Meaning |
+|---|---|
+| One Job name per line, a new one every minute | One Job at a time. `active=1` throughout |
+| **No `Complete` anywhere** | No Job lived long enough |
+| `SuccessfulDelete` exactly 60 seconds after each `SuccessfulCreate`, and the next Job created at the same instant | The controller deleted the running Job and started the new one together, every minute |
+
+A Job that needs 100 seconds, under `Replace` with a one-minute schedule, **never finishes**.
+
+### The three policies compared
+
+| Policy | Runs overlapping | A run missed during an active Job | Does a Job complete? |
+|---|---|---|---|
+| `Allow` (default) | Yes, `active=2` | Not applicable: it starts anyway | Yes, each after about 105 s |
+| `Forbid` | **Never** | **Postponed** until the Job ends, then one catch-up run for the latest time | Yes |
+| `Replace` | Never | The running Job is **deleted** and replaced | **No**, here, since each is replaced at 60 s |
 
 ---
 
@@ -2278,6 +2418,8 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 | A CronJob never runs | A bad schedule, `suspend: true`, or a missed `startingDeadlineSeconds` | `kubectl describe cronjob X` and read the events |
 | A CronJob runs at the wrong hour | The schedule is read in the controller's time zone | Set `timeZone` |
 | Overlapping CronJob runs | `concurrencyPolicy: Allow` is the default | Use `Forbid` or `Replace` |
+| With `Forbid`, a Job starts late, right after the previous one ended | `Forbid` postpones a missed run instead of dropping it, and starts only one catch-up run for the latest missed time | Set `startingDeadlineSeconds` if late runs are unwanted (not tested here) |
+| With `Replace`, no Job ever completes | Each new run deletes the running Job after one schedule period | Use `Forbid` or `Allow`, or make the Job shorter than the period |
 | Old Jobs pile up | No history limits, or limits set high | Set `successfulJobsHistoryLimit` and `failedJobsHistoryLimit` |
 | A suspended CronJob still has a running Job | Suspending stops **new** runs only. A Job that has already started finishes | Delete the Job if you need it stopped |
 | A resumed CronJob did not run the minutes it missed | By design: it creates **one** Job for the latest scheduled minute | Run `kubectl create job NAME --from=cronjob/CRON` if you need an extra run |
@@ -2366,6 +2508,7 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - **Labs 27 and 29** (Jobs): a Job that completes (`9s`, one `Completed` pod), and a Job that exceeded `activeDeadlineSeconds` (pod terminated at 20 s, `DeadlineExceeded`, about 30 s of `Terminating`)
 - **Labs 31, 32, 38, 39 and 40** (CronJobs): a CronJob every minute with Jobs named by the scheduled minute (`tick-29858354` is 23:14 UTC), history capped at 2, a manual run that counted toward the limit, suspend and resume (one Job on resume, none for skipped minutes), a failing CronJob capped at 1 and then 3 (and held at 3 over more than 3 hours), and a Job deleted 30 seconds after finishing by its TTL
 - **Labs 28 and 30** (parallelism and the deadline against retries), and the **clock experiments**: two pods at a time in a sliding window (45 s for six completions), a deadline that ended a Job with retries left, and retry delays that disappeared on a node whose clock was behind (4, 4, 5 s) and returned once it was correct (11 to 21 s, doubling)
+- **Labs 29b and 33**: a pod that handles the termination signal let a deadline Job fail in about 21 s instead of 51 s, and the three concurrency policies (`Allow` overlapped, `Forbid` postponed the missed run and then ran one catch-up Job, `Replace` deleted each Job after 60 s so none completed)
 - **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
@@ -2376,7 +2519,6 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - Deployment `Recreate`, pause and resume, and a change-cause annotation
 - A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
 - A custom DaemonSet: placement, tolerations, node labels and its update
-- The fast-stop variant (Lab 29b) and concurrency policies (Lab 33)
 
 For those, the expected behavior in this guide is what the Kubernetes documentation describes, and **not** a captured result from this cluster. Counts such as the number of failed pods for a given `backoffLimit` can vary slightly with timing, so trust what you observe. Check the official Kubernetes documentation for the version you run.
 
