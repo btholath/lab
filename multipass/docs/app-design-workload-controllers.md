@@ -967,9 +967,9 @@ Both run on the **master too**, even though the master carries the `node-role.ku
 
 # 11. Implementing DaemonSets
 
-All steps **(not run)** on this cluster, except reading the existing ones in Section 10.
+Labs 23 to 26 were **run on the real cluster**, with the observed results after each lab. They build on each other: do not delete the DaemonSet between them.
 
-## Lab 23: a node logger
+## Lab 23: a node logger, with no toleration
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -999,21 +999,53 @@ spec:
         - -c
         - |
           while true; do
-            echo "running on $NODE_NAME at $(date)"
+            echo "running on $NODE_NAME at $(date -u +%T)"
             sleep 30
           done
 EOF
+sleep 20
 kubectl get daemonset node-logger
 kubectl get pods -l app=node-logger -o wide
-```
-
-The `env` block injects the node's own name into each pod through the downward API. **Expect `DESIRED 2`**, not 3: one pod on each worker and **none on the master**, because the master's taint is not tolerated.
-
-```bash
 kubectl logs -l app=node-logger --prefix --tail=2
 ```
 
-`--prefix` puts each pod's name in front of its lines. Each line should name a different worker.
+The `env` block gives each pod the name of its own node, through the downward API.
+
+### Observed on the real cluster
+
+```text
+NAME          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+node-logger   2         2         2       2            2           <none>          20s
+NAME                READY   STATUS    RESTARTS   AGE   IP             NODE      ...
+node-logger-k9xq6   1/1     Running   0          20s   10.244.2.193   worker2
+node-logger-s9h99   1/1     Running   0          20s   10.244.1.52    worker1
+[pod/node-logger-s9h99/logger] running on worker1 at 14:44:10
+[pod/node-logger-k9xq6/logger] running on worker2 at 07:16:09
+```
+
+| Prediction | Observed |
+|---|---|
+| `DESIRED 2`, not 3 | **2** |
+| One pod on each worker, **none on the master**, whose taint is not tolerated | `k9xq6` on worker2 and `s9h99` on worker1. Nothing on the master |
+| Each log line names a different worker | `running on worker1` and `running on worker2` |
+
+**A surprise in the logs:** the two lines were printed in the same command, at most 30 seconds apart, yet their clocks differ by 7 hours 28 minutes (`14:44:10` against `07:16:09`). The nodes' clocks disagreed at that moment. See Section 15, "A later episode".
+
+## How flannel and kube-proxy get onto the master
+
+They run on the master, so their templates must tolerate its taint:
+
+```bash
+kubectl -n kube-flannel get daemonset kube-flannel-ds -o jsonpath='{.spec.template.spec.tolerations}{"\n"}'
+kubectl -n kube-system get daemonset kube-proxy -o jsonpath='{.spec.template.spec.tolerations}{"\n"}'
+```
+
+```text
+[{"effect":"NoSchedule","operator":"Exists"}]
+[{"operator":"Exists"}]
+```
+
+flannel tolerates **any** `NoSchedule` taint, which includes the master's. kube-proxy has a bare `operator: Exists` with no key and no effect, so it tolerates **every** taint of any effect. That is the usual pattern for node-level agents, and it is why kube-proxy kept running through the `NoExecute` experiments.
 
 ## Lab 24: add a toleration so it also runs on the master
 
@@ -1049,7 +1081,7 @@ spec:
         - -c
         - |
           while true; do
-            echo "running on $NODE_NAME at $(date)"
+            echo "running on $NODE_NAME at $(date -u +%T)"
             sleep 30
           done
 EOF
@@ -1058,46 +1090,150 @@ kubectl get daemonset node-logger
 kubectl get pods -l app=node-logger -o wide
 ```
 
-Expect `DESIRED 3` now, with a pod on the master as well. This is exactly how flannel and kube-proxy run on the control plane.
+### Observed on the real cluster
 
-## Lab 25: limit it to labeled nodes
+```text
+Waiting for daemon set "node-logger" rollout to finish: 1 out of 3 new pods have been updated...
+Waiting for daemon set "node-logger" rollout to finish: 2 out of 3 new pods have been updated...
+Waiting for daemon set "node-logger" rollout to finish: 2 of 3 updated pods are available...
+daemon set "node-logger" successfully rolled out
+NAME          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+node-logger   3         3         3       3            3           <none>          7h30m
+NAME                READY   STATUS    RESTARTS   AGE     IP             NODE
+node-logger-pl5cx   1/1     Running   0          7h28m   10.244.1.53    worker1
+node-logger-wsm2b   1/1     Running   0          7h28m   10.244.2.194   worker2
+node-logger-xnfjg   1/1     Running   0          7h29m   10.244.0.9     master
+```
 
-Use a label value of `enabled`. (Avoid `on`, which YAML reads as a boolean.)
+| Prediction | Observed |
+|---|---|
+| `DESIRED 3`, with a pod on the master | **3**, with `xnfjg` on the master |
+| The workers' pods are **replaced** (the template changed) | Yes: the names changed (`k9xq6`, `s9h99` became `wsm2b`, `pl5cx`) |
+| A rolling update through the nodes | `rollout status` stepped through `1`, `2` and `3 of 3` and ended with `successfully rolled out` |
+
+**The ages are impossible:** `7h30m`, for objects created a minute or two earlier. The master's clock was behind when the objects were created, and then jumped forward about 7.5 hours, so the stored creation times are wrong. Objects created after the clocks were corrected have normal ages. See Section 15.
+
+## Lab 25: limit the DaemonSet with a node label
+
+Use the label value `enabled`, not `on`: YAML reads a bare `on` as a boolean.
 
 ```bash
 kubectl label node worker1 logging=enabled
 kubectl patch daemonset node-logger -p '{"spec":{"template":{"spec":{"nodeSelector":{"logging":"enabled"}}}}}'
 kubectl rollout status daemonset/node-logger
+kubectl get daemonset node-logger
 kubectl get pods -l app=node-logger -o wide
 ```
 
-Expect `DESIRED 1`, with the only pod on worker1. Now react to a **label change**:
+Then react to label changes:
 
 ```bash
 kubectl label node worker2 logging=enabled
+sleep 10
+kubectl get daemonset node-logger
 kubectl get pods -l app=node-logger -o wide
 kubectl label node worker2 logging-
+sleep 10
+kubectl get daemonset node-logger
 kubectl get pods -l app=node-logger -o wide
 ```
 
-Labeling worker2 should create a pod there within seconds, and removing the label should delete it. A DaemonSet continuously reacts to node labels.
+### Observed on the real cluster
 
-## Lab 26: rolling update
+```text
+(after the patch)
+node-logger   1   1   1   1   1   logging=enabled   9h
+node-logger-h8gxv   1/1   Running   0   2s   10.244.1.54   worker1
+
+(after labeling worker2, 10 s later)
+node-logger   2   2   2   2   2   logging=enabled   9h
+node-logger-h8gxv   1/1   Running   0   62s   10.244.1.54    worker1
+node-logger-nqzf2   1/1   Running   0   10s   10.244.2.195   worker2
+
+(after removing worker2's label, 10 s later)
+node-logger   1   1   1   1   1   logging=enabled   9h
+node-logger-h8gxv   1/1   Running       0   72s   10.244.1.54    worker1
+node-logger-nqzf2   1/1   Terminating   0   20s   10.244.2.195   worker2
+```
+
+| Step | Predicted | Observed |
+|---|---|---|
+| After the patch | `DESIRED 1`, the only pod on worker1 | **`DESIRED 1`**, one pod on worker1. The `NODE SELECTOR` column now reads `logging=enabled`. The pods on the master and worker2 were deleted |
+| After labeling worker2 | `DESIRED 2`, a new pod on worker2 within seconds, worker1's not restarted | `DESIRED 2`. `nqzf2` appeared on worker2, **10 seconds old**, and worker1's `h8gxv` kept its name and age |
+| After removing worker2's label | `DESIRED 1`, worker2's pod deleted | `DESIRED 1`, and `nqzf2` was `Terminating` |
+
+A DaemonSet reacts to node labels within seconds. The pod's own shell has no signal handler, so a pod like `nqzf2` can stay in `Terminating` for up to 30 seconds (as in Lab 29). That specific lingering was not confirmed for this pod.
+
+## Lab 26: a rolling image update
+
+First remove the node selector, so the DaemonSet covers all three nodes again:
+
+```bash
+kubectl patch daemonset node-logger --type json -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]'
+kubectl rollout status daemonset/node-logger
+kubectl get daemonset node-logger
+kubectl get pods -l app=node-logger -o wide
+```
+
+Expect `DESIRED 3` with pods on all three nodes. Then change the image and watch the pace:
 
 ```bash
 kubectl set image daemonset/node-logger logger=busybox:1.36
+for i in $(seq 1 50); do
+  echo "$(date -u +%T)  $(kubectl get pods -l app=node-logger --no-headers -o custom-columns=NODE:.spec.nodeName,PHASE:.status.phase,IMAGE:.spec.containers[0].image | awk '{printf "%s:%s:%s  ", $1, $2, $3}')"
+  sleep 3
+done
 kubectl rollout status daemonset/node-logger
 kubectl rollout history daemonset/node-logger
 ```
 
-The pods are replaced one node at a time. To see the pace, run `kubectl get pods -l app=node-logger -w` in a second shell first.
+Keep the laptop awake during the loop (about two and a half minutes).
+
+### Observed on the real cluster
+
+```text
+16:28:30  worker1:Running:busybox  master:Running:busybox  worker2:Running:busybox
+[... unchanged for 30 seconds ...]
+16:29:01  worker1:Running:busybox  master:Running:busybox  worker2:Pending:busybox:1.36
+16:29:07  worker1:Running:busybox  master:Running:busybox  worker2:Running:busybox:1.36
+[... unchanged for 30 seconds ...]
+16:29:38  master:Pending:busybox:1.36  worker1:Running:busybox  worker2:Running:busybox:1.36
+16:29:41  master:Running:busybox:1.36  worker1:Running:busybox  worker2:Running:busybox:1.36
+[... unchanged for 30 seconds ...]
+16:30:12  master:Running:busybox:1.36  worker2:Running:busybox:1.36  worker1:Pending:busybox:1.36
+16:30:18  master:Running:busybox:1.36  worker2:Running:busybox:1.36  worker1:Running:busybox:1.36
+daemon set "node-logger" successfully rolled out
+
+REVISION  CHANGE-CAUSE
+1         <none>
+3         <none>
+4         <none>
+5         <none>
+```
+
+| Prediction | Observed |
+|---|---|
+| **One node at a time** | Yes. Only one node changed image at any moment, and the lines mix `busybox` and `busybox:1.36` |
+| About 30 to 35 s per node | **About 31 s** between one node becoming ready and the next replacement, plus about 6 s for a new pod to start. All three nodes took about **1 minute 50 seconds** (16:28:28 to 16:30:18) |
+| Two revisions in the history | **Wrong: four** (1, 3, 4, 5) |
+
+How to read the plateaus:
+
+- The loop prints `status.phase`, and a pod that is shutting down still has the phase `Running`. So each 30-second plateau is most likely the **old pod terminating**. The default update strategy deletes one old pod, waits until it is gone, and only then creates the replacement. The 30 seconds match the default grace period, since this pod's shell ignores the termination signal (the same cause as Lab 29). This is consistent with the evidence, but a `kubectl get pods` listing, which shows `Terminating`, would show it directly.
+- **The order of the nodes** was worker2, then the master, then worker1. That is what happened here, and I would not generalize it.
+- **Revision 2 is missing from the history.** The template sequence was: (1) the original, (2) with a toleration, (3) with a toleration and `nodeSelector`, then removing the selector gave a template **identical to revision 2**. The DaemonSet appears to have reused that revision and renumbered it as 4, and the image change became 5. As with Deployments, revision numbers only go up, and an old number disappears when its template is reused. This is an inference, since the DaemonSet was deleted before it could be checked.
+
+To see how much the signal handling matters, repeat Lab 26 with the `trap` command from Lab 29b in the template. Each node should then take only a few seconds, for a total of about 20 seconds. That was not run.
 
 ## Clean up
 
 ```bash
 kubectl delete daemonset node-logger
 kubectl label node worker1 logging-
+kubectl get nodes --show-labels | grep logging
 ```
+
+The last command should print nothing.
 
 ---
 
@@ -2180,6 +2316,84 @@ foreach ($vm in "master","worker1","worker2") {
 
 - To correct a node, `sudo systemctl restart systemd-timesyncd` inside it, then compare again.
 
+### A later episode: all three VMs behind real time
+
+Hours later, after the laptop had been idle, the clocks misbehaved again, in a different way. Two clues appeared during the DaemonSet labs (Section 11): the pods' own logs disagreed, and a DaemonSet created a minute earlier showed an age of `7h30m`.
+
+```text
+[pod/node-logger-s9h99/logger] running on worker1 at 14:44:10
+[pod/node-logger-k9xq6/logger] running on worker2 at 07:16:09
+node-logger   3   3   3   3   3   <none>   7h30m
+```
+
+A later check against Windows found something different:
+
+```text
+Windows UTC: 16:17:35
+master:  VM clock minus Windows clock = -4,666.8 s
+worker1: VM clock minus Windows clock = -4,667.0 s
+worker2: VM clock minus Windows clock = -4,667.0 s
+```
+
+All three VMs were about **78 minutes behind** Windows, and within 0.2 seconds of each other. Which clock was wrong? Independent sources settled it:
+
+| Source | Reading | Meaning |
+|---|---|---|
+| `w32tm /stripchart /computer:time.windows.com` | Windows is off by about 1.7 s | Windows is right |
+| `curl.exe -sI https://www.google.com`, the `Date` header, from Windows | `16:19:44` GMT | Real time |
+| The same header, fetched from the master | `16:19:45` GMT | Real time (it is Google's own clock, so the VM's clock does not matter) |
+
+So Windows was right, and the VMs were behind. All three being behind by the same amount fits the laptop's sleep pausing them together, though that was not verified.
+
+Four minutes later the picture had changed again:
+
+```text
+master:  VM clock minus Windows clock = -1.3 s      (corrected on its own)
+worker1: VM clock minus Windows clock = -4,667.0 s  (still 78 minutes behind)
+worker2: VM clock minus Windows clock = -1.3 s      (corrected on its own)
+```
+
+Each VM corrected itself at its **own next poll**, so for a while they disagreed. Restarting the time service on worker1 fixed it within the 40-second wait:
+
+```powershell
+multipass exec worker1 -- sudo systemctl restart systemd-timesyncd
+Start-Sleep -Seconds 40
+```
+
+Afterwards all three read about −1.3 s, which is just the round trip of the measurement.
+
+### The status output that misled
+
+worker1's `timedatectl timesync-status` showed `Offset: +1.796ms` and `Poll interval: 17min 4s` while its clock was 78 minutes wrong. As I understand it, the offset is the one measured at the **last poll**, which can be many minutes old. If the VM was paused after that poll, the status looks healthy while the clock is far off. That also explains `NTPSynchronized = yes` on a node whose clock was 43 minutes slow.
+
+**To check a VM's clock, compare it with Windows (or another trusted clock), and do not trust the status.**
+
+### What to do after the laptop sleeps
+
+This restarts the time service on all three VMs and shows the result:
+
+```powershell
+foreach ($vm in "master","worker1","worker2") { multipass exec $vm -- sudo systemctl restart systemd-timesyncd }
+Start-Sleep -Seconds 40
+foreach ($vm in "master","worker1","worker2") {
+  $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $r = multipass exec $vm -- date -u +%s.%N
+  $t1 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  "{0}: VM clock minus Windows clock = {1:N1} s" -f $vm, ([double]$r - ($t0+$t1)/2000.0)
+}
+```
+
+Two ideas to make this automatic, **neither tried**:
+
+- Lower `PollIntervalMaxSec` (for example to 256) in `/etc/systemd/timesyncd.conf`, so a stale clock is corrected within minutes.
+- The VMs expose the host's clock as `/dev/ptp_hyperv`, which a daemon such as chrony can follow, and which I expect would correct the time on resume.
+
+### What it affects
+
+- **Retry delays** vanish when a node is behind the master (see above).
+- **Stored timestamps** are wrong for objects created while the master's clock was off, so ages look impossible. Newer objects are fine.
+- A uniform offset, with all nodes agreeing, is probably harmless to Kubernetes. That exact case was not tested.
+
 ## Clean up
 
 ```bash
@@ -2412,6 +2626,9 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 | `kubectl logs --previous` says `unable to retrieve container logs` | The earlier container instance was no longer available to the runtime (seen after a finished Job, cause not confirmed) | Capture logs while the Job runs, or use `restartPolicy: Never`, which keeps a pod per attempt |
 | A failing Job's retries fire every few seconds, with no growing delay | A node's clock is behind the master's, so pod finish times look old (seen with a node 10 and 43 minutes slow) | Compare the clocks (Section 15), then restart `systemd-timesyncd` on the node |
 | `NTPSynchronized` says `yes`, but the time is wrong | The flag reports that the last poll worked, not that the clock is right now | Compare `date -u` on each node with a trusted clock |
+| `timedatectl timesync-status` shows a tiny `Offset`, but the clock is wrong | The offset is from the last poll, which can be many minutes old (the poll interval reached 34 minutes) | Compare the VM with Windows or another trusted clock, then restart `systemd-timesyncd` |
+| An object created a minute ago shows an age of hours | The master's clock was behind when it was created, then stepped forward | Check the clocks (Section 15). Objects created afterwards are fine |
+| A DaemonSet update takes about 30 seconds per node | The old pod's main process ignores the termination signal, so Kubernetes waits out the grace period | Handle the signal in the container, or lower `terminationGracePeriodSeconds` |
 | A failed Job's pod has disappeared, along with its logs | With `OnFailure`, the Job deletes its pod when it gives up | Use `restartPolicy: Never` when you need to debug failures |
 | A Job using a counter file in `emptyDir` never succeeds with `Never` | Each retry is a new pod with a fresh volume | Use `OnFailure`, or keep state outside the pod |
 | A Job past its `activeDeadlineSeconds` still shows a `Terminating` pod for about 30 seconds | The container ignores the termination signal (for example a shell as the main process), so Kubernetes waits out the default grace period | Handle the signal with `trap`, or lower `terminationGracePeriodSeconds` (Lab 29b) |
@@ -2509,6 +2726,7 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - **Labs 31, 32, 38, 39 and 40** (CronJobs): a CronJob every minute with Jobs named by the scheduled minute (`tick-29858354` is 23:14 UTC), history capped at 2, a manual run that counted toward the limit, suspend and resume (one Job on resume, none for skipped minutes), a failing CronJob capped at 1 and then 3 (and held at 3 over more than 3 hours), and a Job deleted 30 seconds after finishing by its TTL
 - **Labs 28 and 30** (parallelism and the deadline against retries), and the **clock experiments**: two pods at a time in a sliding window (45 s for six completions), a deadline that ended a Job with retries left, and retry delays that disappeared on a node whose clock was behind (4, 4, 5 s) and returned once it was correct (11 to 21 s, doubling)
 - **Labs 29b and 33**: a pod that handles the termination signal let a deadline Job fail in about 21 s instead of 51 s, and the three concurrency policies (`Allow` overlapped, `Forbid` postponed the missed run and then ran one catch-up Job, `Replace` deleted each Job after 60 s so none completed)
+- **Labs 23 to 26** (DaemonSets): no toleration (2 pods, none on the master), flannel and kube-proxy tolerations, a toleration added (3 pods, the workers' pods replaced), a node label controlling placement (1, 2, then 1 pod, reacting within seconds), and a rolling image update (one node at a time, about 31 s per node, 4 revisions in the history)
 - **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
@@ -2518,7 +2736,6 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - ReplicaSets created directly: self-healing, scaling, relabeling, ownership and the "template change does not update pods" challenge
 - Deployment `Recreate`, pause and resume, and a change-cause annotation
 - A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
-- A custom DaemonSet: placement, tolerations, node labels and its update
 
 For those, the expected behavior in this guide is what the Kubernetes documentation describes, and **not** a captured result from this cluster. Counts such as the number of failed pods for a given `backoffLimit` can vary slightly with timing, so trust what you observe. Check the official Kubernetes documentation for the version you run.
 
