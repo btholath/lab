@@ -4,7 +4,7 @@
 
 This guide is one part of the "Application design and build" topic. It explains how Kubernetes keeps your application running (labels and selectors, ReplicaSets, Deployments, DaemonSets) and how it runs work that finishes (Jobs and CronJobs). Each concept is followed by an implementation you can run.
 
-It is built on a real three-node kubeadm cluster (1 control plane, 2 workers, Kubernetes v1.36.5). Console output from that cluster is included wherever the feature was run there. Labs the cluster has **not** run are marked **(not run)**, and their expected behavior is described in words, not shown as captured output.
+It is built on a real three-node kubeadm cluster (1 control plane, 2 workers, Kubernetes v1.36.5). All 41 labs were run on that cluster, and the console output after each one (marked "Observed on the real cluster") is copied from the run. Where a prediction turned out wrong, the guide says so. Explanations marked as unverified or as inferences are best guesses and not results, and the last section lists the two labs with a caveat.
 
 **Contents**
 
@@ -709,7 +709,11 @@ nginx-79f698694b   3         3         3       2m9s
 
 # 7. Implementing Deployments
 
-## Lab 12: create and inspect a Deployment **(not run as written; the same kind of objects were run before)**
+Labs 12 to 17 were **run on the real cluster**, with the observed results after each lab. Run them in the master shell, in the `appdesign` namespace, with no pods left over from the ReplicaSet labs.
+
+The `web` Deployment here has **no readiness probe**, so a new pod counts as ready the moment its container starts. That makes these rollouts finish in a few seconds, much faster than the labs in Section 9, which used a probe with a delay.
+
+## Lab 12: create and inspect a Deployment
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -731,28 +735,55 @@ spec:
       - name: nginx
         image: nginx
 EOF
+kubectl rollout status deployment/web
 kubectl get deployment web
 kubectl get rs -l app=web
 kubectl get pods -l app=web -o wide
 ```
 
-Expect `READY 4/4`, one ReplicaSet named `web-<hash>`, and four pods named `web-<hash>-<suffix>`. The imperative form of the same thing is `kubectl create deployment web --image=nginx --replicas=4`.
+### Observed on the real cluster
 
-## Lab 13: update the image and watch the rollout
+```text
+NAME   READY   UP-TO-DATE   AVAILABLE   AGE
+web    4/4     4            4           3s
+NAME             DESIRED   CURRENT   READY   AGE
+web-7887448d46   4         4         4       3s
+NAME                   READY   STATUS    RESTARTS   AGE   IP             NODE
+web-7887448d46-4mdn2   1/1     Running   0          3s    10.244.2.205   worker2
+web-7887448d46-59mzf   1/1     Running   0          3s    10.244.1.62    worker1
+web-7887448d46-jbtdw   1/1     Running   0          3s    10.244.2.206   worker2
+web-7887448d46-xgflk   1/1     Running   0          3s    10.244.1.63    worker1
+```
+
+`READY 4/4`, **one** ReplicaSet named `web-<hash>`, and four pods named `web-<hash>-<suffix>`, two on each worker. The imperative form of the same thing is `kubectl create deployment web --image=nginx --replicas=4`.
+
+## Lab 13: update the image, and record a reason
 
 ```bash
 kubectl set image deployment/web nginx=nginx:alpine
 kubectl rollout status deployment/web
 kubectl get rs -l app=web
-kubectl rollout history deployment/web
-```
-
-Expect two ReplicaSets: the new one with 4 pods, and the old one at 0. The history lists two revisions. To make the history readable, record a reason right after a change:
-
-```bash
 kubectl annotate deployment/web kubernetes.io/change-cause="switch to nginx:alpine" --overwrite
+sleep 3
 kubectl rollout history deployment/web
 ```
+
+### Observed on the real cluster
+
+```text
+deployment.apps/web image updated
+[... 1, 2, 3 of 4 new replicas updated, then 1 old replicas are pending termination ...]
+deployment "web" successfully rolled out
+NAME             DESIRED   CURRENT   READY   AGE
+web-68dfbdbf65   4         4         4       4s
+web-7887448d46   0         0         0       7s
+deployment.apps/web annotated
+REVISION  CHANGE-CAUSE
+1         <none>
+2         switch to nginx:alpine
+```
+
+Two ReplicaSets: the new one at 4, and the old one kept at 0 for rollback. The reason you record with the annotation **attached to revision 2** even though it was added after the rollout finished.
 
 ## Lab 14: roll back
 
@@ -760,43 +791,167 @@ kubectl rollout history deployment/web
 kubectl rollout undo deployment/web
 kubectl rollout status deployment/web
 kubectl get pods -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image
+kubectl get rs -l app=web
+kubectl rollout history deployment/web
 ```
 
-Expect the images back to `nginx`. To go to a specific revision, use `kubectl rollout undo deployment/web --to-revision=1`, and inspect a revision first with `kubectl rollout history deployment/web --revision=1`.
+To go to a specific revision, use `kubectl rollout undo deployment/web --to-revision=1`, and inspect a revision first with `kubectl rollout history deployment/web --revision=1`.
 
-## Lab 15: pause, stage several changes, resume
+### Observed on the real cluster
+
+```text
+Warning: resource deployments/web was previously managed with 'kubectl apply'. Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation, which may cause unexpected behavior on future 'kubectl apply' operations. Consider using 'kubectl apply' with your previous configuration file instead.
+deployment.apps/web rolled back
+[...]
+NAME                   IMAGE
+web-68dfbdbf65-cbnlp   nginx:alpine
+web-7887448d46-9hz5m   nginx
+web-7887448d46-g95jj   nginx
+web-7887448d46-lt6f5   nginx
+web-7887448d46-vv7nm   nginx
+NAME             DESIRED   CURRENT   READY   AGE
+web-68dfbdbf65   0         0         0       11s
+web-7887448d46   4         4         4       14s
+REVISION  CHANGE-CAUSE
+2         switch to nginx:alpine
+3         <none>
+```
+
+| Observation | Meaning |
+|---|---|
+| The **old** ReplicaSet is back at 4 and the other at 0, with **no third ReplicaSet** | An undo scales the old ReplicaSet back up |
+| History is now **2 and 3**, and revision 1 is gone | The old template is re-labeled as the newest revision. Revision numbers only go up |
+| Revision 3 shows `<none>` | **The reason did not follow the undo.** It stayed on revision 2. I expected the stale text to be copied. It seems `kubectl rollout undo` restores the old revision's annotations, but I have not confirmed that |
+| Five pods in the listing | The fifth, `web-68dfbdbf65-cbnlp`, is the last `nginx:alpine` pod on its way out (the column does not show its status) |
+| The **warning** | The Deployment was created with `kubectl apply`, which records the manifest in an annotation. `rollout undo` changes the live object but not that record, so a later `apply` of the original file could compute a confusing difference. kubectl's remedy is to re-apply the previous manifest |
+
+## Lab 15: pause, stage two changes, resume
 
 ```bash
 kubectl rollout pause deployment/web
 kubectl set image deployment/web nginx=nginx:alpine
 kubectl set resources deployment/web -c nginx --requests=cpu=50m,memory=32Mi
+sleep 10
+kubectl get rs -l app=web
+kubectl get pods -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image
 kubectl rollout resume deployment/web
 kubectl rollout status deployment/web
+kubectl get rs -l app=web
+kubectl get pods -l app=web -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image,CPU:.spec.containers[0].resources.requests.cpu
+kubectl rollout history deployment/web
 ```
 
-While paused, no rollout starts. On `resume`, both changes roll out together, as one revision.
+### Observed on the real cluster
 
-## Lab 16: the `Recreate` strategy
+```text
+(while paused)
+web-68dfbdbf65   0   0   0   28s
+web-7887448d46   4   4   4   31s
+web-7887448d46-9hz5m   nginx
+web-7887448d46-g95jj   nginx
+web-7887448d46-lt6f5   nginx
+web-7887448d46-vv7nm   nginx
+
+(after resume)
+web-68dfbdbf65   0   0   0   33s
+web-7887448d46   0   0   0   36s
+web-7c95f5c9b5   4   4   4   4s
+web-7887448d46-9hz5m   nginx          <none>
+web-7c95f5c9b5-hs42p   nginx:alpine   50m
+web-7c95f5c9b5-nrppv   nginx:alpine   50m
+web-7c95f5c9b5-pxft2   nginx:alpine   50m
+web-7c95f5c9b5-qcp5t   nginx:alpine   50m
+
+REVISION  CHANGE-CAUSE
+3         <none>
+4         switch to nginx:alpine
+5         <none>
+```
+
+| Prediction | Observed |
+|---|---|
+| While paused: no new ReplicaSet, no new pods | Correct. Two edits, and the pods all still ran `nginx` |
+| After resume: **one** rollout with both changes together | Correct: **one** new ReplicaSet, `web-7c95f5c9b5`, with `nginx:alpine` **and** `cpu=50m` in every new pod |
+| The history gains **one** revision | **Wrong: two numbers** (4 and 5), and revision 2 vanished |
+
+The history needs an explanation, and this one is **unverified**, since the Deployment was deleted before it could be inspected. The first edit while paused (`set image` to `nginx:alpine`) produced a template **identical to the existing alpine ReplicaSet** (`web-68dfbdbf65`). That ReplicaSet appears to have been recorded as the newest revision (4), keeping its old reason, even though no pods moved. The second edit (`set resources`) then made a template no ReplicaSet had, and on resume it created revision 5. So there was **one real rollout but two new revision numbers**.
+
+## Lab 16 (and Lab 22): the `Recreate` strategy
 
 ```bash
 kubectl patch deployment web -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+kubectl get deployment web -o jsonpath='{.spec.strategy}{"\n"}'
 kubectl set image deployment/web nginx=nginx
-kubectl get pods -l app=web -w
-```
-
-Press Ctrl+C to stop watching. Expect **all old pods to terminate before any new one starts**, so for a moment the application has no pods. `Recreate` is for applications that cannot run two versions at the same time. The `rollingUpdate: null` part clears the rolling settings, because `Recreate` cannot have them. Set it back:
-
-```bash
+for i in $(seq 1 14); do echo "$(date -u +%T)  [$(kubectl get deployment web -o jsonpath='{.status.replicas}')] total, [$(kubectl get deployment web -o jsonpath='{.status.availableReplicas}')] available"; sleep 2; done
+kubectl rollout status deployment/web
 kubectl patch deployment web -p '{"spec":{"strategy":{"type":"RollingUpdate"}}}'
+kubectl get deployment web -o jsonpath='{.spec.strategy}{"\n"}'
 ```
+
+`rollingUpdate: null` clears the rolling settings, because `Recreate` cannot have them. The brackets in the counter let you tell a **missing** value (which means zero) from a stray space.
+
+### Observed on the real cluster
+
+```text
+{"type":"Recreate"}
+deployment.apps/web image updated
+16:53:00  [4] total, [] available
+16:53:03  [4] total, [] available
+16:53:05  [4] total, [4] available
+16:53:07  [4] total, [4] available
+[... [4] total, [4] available ...]
+deployment "web" successfully rolled out
+{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"},"type":"RollingUpdate"}
+```
+
+| Observation | Meaning |
+|---|---|
+| `[] available` for the first two samples (about **5 seconds**) | **Zero pods were available.** That is the downtime of `Recreate`: every old pod goes before any new one is ready |
+| `[4] total` in the same samples | The four new pods already existed, but were not ready yet |
+| Then `[4] total, [4] available` | The new pods came up together |
+| The patch back to `RollingUpdate` | The defaults (25% and 25%) reappear |
+
+The loop started after the update command, so the beginning of the gap was not captured, and the real gap was probably a little longer. Compare **Lab 18**, where `available` never dipped below 4, and Lab 19, where it dropped to 2. `Recreate` goes to 0. Use it only for applications that cannot run two versions at once.
 
 ## Lab 17: restart without changing anything
 
 ```bash
 kubectl rollout restart deployment/web
+kubectl rollout status deployment/web
+kubectl get pods -l app=web -o wide
+kubectl rollout history deployment/web
 ```
 
-This is the command used on the real cluster to recreate pods and rebalance them across nodes.
+### Observed on the real cluster
+
+```text
+NAME                   READY   STATUS      RESTARTS   AGE   IP             NODE
+web-68cd756888-z5wt8   0/1     Completed   0          34s   10.244.1.70    worker1
+web-7b8d8849c8-bfl8n   1/1     Running     0          2s    10.244.1.73    worker1
+web-7b8d8849c8-bspr8   1/1     Running     0          4s    10.244.2.215   worker2
+web-7b8d8849c8-hgtfd   1/1     Running     0          4s    10.244.1.72    worker1
+web-7b8d8849c8-wg9rk   1/1     Running     0          2s    10.244.2.216   worker2
+
+REVISION  CHANGE-CAUSE
+3         <none>
+4         switch to nginx:alpine
+5         <none>
+6         <none>
+7         <none>
+```
+
+The restart created a new ReplicaSet (a new hash, with the `restartedAt` annotation in its template), and the four new pods are spread over both workers. Revision 6 is the `Recreate` rollout (an `nginx` image **with** the CPU request, a template that never existed before), and revision 7 is the restart.
+
+The pod `web-68cd756888-z5wt8`, marked `Completed`, belonged to the previous template. It was gone in the next listing. My reading is that recent kubectl shows `Terminating` only for pods that have not finished, so a pod being deleted whose nginx had already exited cleanly (status 0) shows its final phase, `Completed`. That is the last old pod mid-removal, and the explanation is unconfirmed.
+
+## Clean up
+
+```bash
+kubectl delete deployment web
+kubectl get pods
+```
+
+Deleting a Deployment deletes its ReplicaSets and pods, which then show `Terminating` for a moment.
 
 ---
 
@@ -874,7 +1029,7 @@ A new pod only counts as available after its **readiness probe** passes (and `mi
 
 # 9. Implementing `maxSurge` and `maxUnavailable`
 
-Labs 18 to 21 were **run on the real cluster**, and the observed results are shown after each lab. Lab 22 was not run. To make the pace visible, the labs use a readiness probe with a delay, so each new pod takes about ten seconds to become available.
+Labs 18 to 22 were **run on the real cluster**, and the observed results are shown after each lab (Lab 22 was done as part of Lab 16). To make the pace visible, the labs use a readiness probe with a delay, so each new pod takes about ten seconds to become available.
 
 You need **two** shells: one to change things (**Shell A**) and one to watch (**Shell B**). Open a second master shell with `multipass shell master` in another PowerShell window. A new shell reads the same kubeconfig file, so it uses the `appdesign` namespace too.
 
@@ -1074,9 +1229,17 @@ The Deployment "rolling" is invalid: spec.strategy.rollingUpdate.maxUnavailable:
 
 The API refuses the change, and the previous values are untouched.
 
-## Lab 22: compare with `Recreate` timing **(not run)**
+## Lab 22: compare with `Recreate` timing
 
-If you ran Lab 16, compare its watch: with `Recreate` there is a moment with **no** pods at all, while the settings above never went below the minimums shown.
+This was done as part of Lab 16 (Section 7), whose counter shows what `Recreate` does. Putting the three strategies side by side:
+
+| | Lab 18 (`maxSurge: 1`, `maxUnavailable: 0`) | Lab 19 (`maxSurge: 0`, `maxUnavailable: 2`) | Lab 16 (`Recreate`) |
+|---|---|---|---|
+| Lowest `available` | **4** | **2** | **0**, for about 5 s at least |
+| Highest `total` | 5 | 4 | 4 |
+| Time to finish | about 51 s (with a 10 s readiness probe) | about 29 s (the same probe) | about 5 s (no probe, so not directly comparable) |
+
+The times are **not** comparable across the table, since Lab 16 used no readiness probe. The availability row is the comparison that matters: the rolling settings trade time for capacity, and `Recreate` has no capacity guarantee at all.
 
 ## Clean up
 
@@ -2788,6 +2951,9 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 | Changing a ReplicaSet's image does nothing | A ReplicaSet does not update existing pods | Use a Deployment |
 | A Deployment rollout is stuck | A bad image, a failing readiness probe, or no capacity | `kubectl rollout status`, `kubectl describe pod`, then `kubectl rollout undo` |
 | An update is too slow, or capacity drops | `maxSurge` and `maxUnavailable` do not suit the workload | Tune them (Section 8) |
+| `rollout undo` prints a warning about `last-applied-configuration` | The Deployment was created with `kubectl apply`, and an undo does not update that record | Re-apply the previous manifest instead, or accept that the next `apply` may show a surprising difference |
+| After pausing a Deployment and editing it twice, the history gained two new numbers | An edit that matches an existing ReplicaSet is recorded as a revision at once, even while paused (an inference) | Read `kubectl rollout history` with `--revision=N` before relying on the numbers |
+| A pod shows `Completed` and `0/1` right after a rollout | A pod being deleted whose container has already exited cleanly shows its final phase, not `Terminating` (an inference) | It disappears on its own |
 | `set image` printed no `image updated` line, and nothing rolled out | The image was already that value, so the pod template did not change | Check the current image with `kubectl get deployment X -o jsonpath='{.spec.template.spec.containers[0].image}'` |
 | A rollout stalls at `N out of 4 new replicas have been updated` and the new pods never become ready | A bad image name (for example `nginx-alpine` instead of `nginx:alpine`), or a failing readiness probe | `kubectl get pods`, `kubectl describe pod`, then fix the image or `kubectl rollout undo`. The old pods keep serving meanwhile |
 | `error: deployment "X" exceeded its progress deadline` | No progress for `progressDeadlineSeconds` (default 600 s). It can still be reported just after you fix the cause | Check `kubectl get rs` and the pods to see where the rollout really stands |
@@ -2902,16 +3068,19 @@ Deleting a CronJob also deletes its Jobs, including a manual one created with `-
 - **Labs 29b and 33**: a pod that handles the termination signal let a deadline Job fail in about 21 s instead of 51 s, and the three concurrency policies (`Allow` overlapped, `Forbid` postponed the missed run and then ran one catch-up Job, `Replace` deleted each Job after 60 s so none completed)
 - **Labs 23 to 26** (DaemonSets): no toleration (2 pods, none on the master), flannel and kube-proxy tolerations, a toleration added (3 pods, the workers' pods replaced), a node label controlling placement (1, 2, then 1 pod, reacting within seconds), and a rolling image update (one node at a time, about 31 s per node, 4 revisions in the history)
 - **Labs 1 to 11** (labels and ReplicaSets): labeled pods and eight selectors, the refusal to change a label without `--overwrite`, node labels, a ReplicaSet that healed itself, scaled down by removing the newest pods, released and re-adopted a pod by its labels, and left two image versions running after a template change
+- **Labs 12 to 17 and 22** (Deployments): create, update and annotate, a rollback with a warning about `kubectl apply` and a reason that did not follow the undo, pause and resume (one rollout, two new revision numbers), `Recreate` (about 5 s with zero pods available), and a restart
 - **Labs 34 to 37** (`backoffLimit`): `backoffLimit: 3` with `Never` (4 pods, gaps of 11, 23 and 43 s, 78 s in total), `backoffLimit: 0` (one pod, about 5 s), `OnFailure` (one pod restarted in place, pod deleted at the end, about 42 s), and a Job that succeeded on its third attempt (17 s, `SuccessCriteriaMet` then `Complete`)
 - Labels: a Service selecting pods with `app=nginx`, the node `ROLES` column changing after `kubectl label node`
 - The two existing DaemonSets (flannel and kube-proxy) and their output
 
-## Not run (every lab marked **(not run)**)
+## Not run cleanly
 
-- Deployment `Recreate`, pause and resume, and a change-cause annotation
-- A clean percentage rollout (the run in Section 9 stalled on a bad image name) and Lab 22
+Every lab in this guide has now been run on the real cluster, with two caveats:
 
-For those, the expected behavior in this guide is what the Kubernetes documentation describes, and **not** a captured result from this cluster. Counts such as the number of failed pods for a given `backoffLimit` can vary slightly with timing, so trust what you observe. Check the official Kubernetes documentation for the version you run.
+- **Lab 20:** a clean percentage rollout (`maxSurge: 50%`, `maxUnavailable: 25%`) was not captured. The run stalled on a bad image name, which still showed the 6-pod maximum and the 3-available minimum.
+- **Lab 22:** it was done as part of Lab 16, with no separate run.
+
+Counts such as the number of failed pods for a given `backoffLimit`, and the pace of a rollout, can vary slightly with timing, so trust what you observe. The explanations marked as unverified in the text are inferences, not results. Check the official Kubernetes documentation for the version you run.
 
 ## Clean up everything from this guide
 
