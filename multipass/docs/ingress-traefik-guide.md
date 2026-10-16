@@ -2,9 +2,9 @@
 
 ## What Step 2 deploys, what each piece does, and how a request flows
 
-> **Status: written before the first run.** Nothing in this guide has been executed on the cluster yet. Every output shown is **Expected**, a prediction, and none is **Observed**. The manifests were checked with a YAML parser and the RBAC rules were compared with Traefik's own documentation, but a manifest that parses can still fail on a real cluster. After the labs are run, the *Expected* blocks should be replaced with real output, and the "What is verified" section updated.
+> **Status: written before the first run.** Nothing in this guide has been executed on the cluster yet. Every output shown is **Expected**, a prediction, and none is **Observed**, apart from the few facts listed under *Observed so far* in Section 13. The manifests were checked with a YAML parser and the RBAC rules were compared with Traefik's own documentation, but a manifest that parses can still fail on a real cluster. After the labs are run, the *Expected* blocks should be replaced with real output, and the "What is verified" section updated.
 
-![The four scenes: send, objects, Pod starts, traffic](traefik-step2-flow.gif)
+![The four scenes: send, objects, Pod starts, traffic](images/traefik-step2-flow.gif)
 
 *The animation above (`traefik-step2-flow.gif`) walks through Sections 5 to 8: the 7 objects, how a Pod appears, and the path of a request.*
 
@@ -67,9 +67,9 @@ The usual tutorial controller is **ingress-nginx**, and it was not used here. Th
 | **Traefik was chosen** | It is maintained, installs from plain YAML (no Helm needed), and the official image is **about 52 MB compressed** on Docker Hub. Docker Hub pulled quickly for this cluster earlier (busybox, nginx), while `registry.k8s.io` pulls ranged from 2 seconds to over 4 minutes for small images |
 | **The version is pinned to `v3.7.12`** | Traefik **v3.7.9**, the version the documentation examples and the Helm chart default to, falls inside the range of a published vulnerability: a **ForwardAuth identity spoofing** issue through a dot-form header alias, affecting v3.0.0 up to 3.7.11 and fixed in **v3.7.12**. The advisory (recorded as CVE-2026-88011 and CVE-2026-88879 in the OSV database) was published on September 10, 2026, so v3.7.12 is more than five weeks old |
 | **The fix is opt-in** | The fix adds an entry-point option, `aliasHeadersStrategy`, whose default keeps the old behaviour, and which must be set to `delete` or `reject` to take effect. **It is not set in this lab**: the lab doesn't use ForwardAuth, and I haven't verified the option's exact flag name, since a wrong flag would stop Traefik from starting |
-| **The test image** | `traefik/whoami:v1.11`, about 7 MB: a tiny web server that prints the request it received, so you can see exactly what the Ingress did |
+| **The test image** | `traefik/whoami:v1.11`, about 3 MB (2.9 MiB were fetched in the first real pull): a tiny web server that prints the request it received, so you can see exactly what the Ingress did |
 
-**Not verified:** that Docker Hub carries a `v3.7.12` tag. The pre-pull in Step 1 tests that before anything is deployed, and if the pull says `not found`, the fallbacks are `v3.7.13` or `v3.7.11`. The latter has the known issue.
+**Docker Hub carries the `v3.7.12` tag:** observed, see Section 13. (Had it not, the fallbacks would have been `v3.7.13` or `v3.7.11`, and the latter has the known issue.)
 
 ---
 
@@ -122,7 +122,7 @@ metadata:
   name: traefik-ingress-controller
 rules:
 - apiGroups: [""]                      # the core API group
-  resources: ["services", "secrets"]
+  resources: ["services", "secrets", "nodes"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
@@ -137,12 +137,12 @@ rules:
 
 | Rule | In plain words |
 |---|---|
-| `services`, `secrets`: get, list, watch | Read Services (to find where traffic can go) and **Secrets** (TLS certificates), in **every** namespace |
+| `services`, `secrets`, `nodes`: get, list, watch | Read Services (to find where traffic can go), **Secrets** (TLS certificates) in **every** namespace, and the cluster's **Nodes**. Traefik's Kubernetes provider watches Nodes, and **without this rule it never loads a single route** (observed, Section 13) |
 | `endpointslices`: get, list, watch | Read which Pod addresses currently stand behind each Service |
 | `ingresses`, `ingressclasses`: get, list, watch | Read the routing rules, and which controller each one is meant for |
 | `ingresses/status`: update | Write an address back into an Ingress's status |
 
-`watch` means the controller is **told about changes** as they happen, instead of asking repeatedly. That is why a new Ingress takes effect almost at once. A ClusterRole is cluster-wide, so it sits outside the namespace. These rules are copied from Traefik's own documentation for the Ingress provider (Section 15), and the script confirmed that the file matches them rule for rule.
+`watch` means the controller is **told about changes** as they happen, instead of asking repeatedly. That is why a new Ingress takes effect almost at once. A ClusterRole is cluster-wide, so it sits outside the namespace. **The `nodes` rule was missing from the first version of this file.** It copied the rules from the Traefik documentation page I read, which does not list `nodes`, and the first real run showed that Traefik v3.7.12 needs it: its log filled with `nodes is forbidden`, and every host got a 404 (Section 13). I had in fact included `nodes` in my first draft, from memory, and removed it after comparing with the page. The comparison proved that the file matched the page, which is not the same as the page being complete.
 
 ## 5.4 ClusterRoleBinding: handing the permissions over
 
@@ -289,7 +289,7 @@ The same steps happen for every Deployment. The probes, scheduling, RBAC and Nod
 | 6 | **kubelet** | Probes `GET /ping` on port 8080. When it answers, the Pod becomes **Ready** (the probes guide) |
 | 7 | **EndpointSlice controller** | Lists the Ready Pod's address in the Service's endpoints |
 | 8 | **kube-proxy** | On **every** node, programs port 30080 to forward to the Service and then to the Pod (the Services guide) |
-| 9 | **Traefik itself** | Starts, authenticates with its ServiceAccount token, and begins to watch Ingresses, IngressClasses, Services, EndpointSlices and Secrets |
+| 9 | **Traefik itself** | Starts, authenticates with its ServiceAccount token, and begins to watch Ingresses, IngressClasses, Services, EndpointSlices, Secrets and Nodes (if any one of these watches fails, it loads no routes at all: Section 13) |
 
 At this point **no Ingress exists**, so Traefik's routing table is empty. A request to the door should therefore be answered by Traefik itself with a **404**, which is a useful check that the door works before any application exists (Section 10).
 
@@ -392,20 +392,65 @@ The version choice is the other security point: v3.7.12 includes the fix for the
 
 # 10. How to run it
 
+## The shortcut: one script
+
+`ingress-lab.sh` (in `scripts/`) does Steps 2 and 3 and every check in this section, in one go, and **it is safe to run again and again**: a second run prints `unchanged` and changes nothing.
+
+```powershell
+multipass transfer ingress-lab.sh master:/home/ubuntu/
+multipass exec master -- bash /home/ubuntu/ingress-lab.sh            # set up and check
+multipass exec master -- bash /home/ubuntu/ingress-lab.sh status     # check only, change nothing
+multipass exec master -- bash /home/ubuntu/ingress-lab.sh down       # remove everything
+multipass exec master -- bash /home/ubuntu/ingress-lab.sh reset      # remove everything, then set it up again from a clean start
+```
+
+| It checks first | And stops, before changing anything, if |
+|---|---|
+| Whether both image tags exist on Docker Hub (a `HEAD` request, nothing is downloaded) | A tag is missing. The message names the variable to change, such as `TRAEFIK_VERSION=<tag>` |
+| Whether NodePort 30080 is free, or already this lab's | Another Service uses it |
+
+It then applies the manifests, waits for each Deployment with a progress line (so a slow image pull is visible, not silent), gives up early if an event says an image can't be found, and finishes with `PASS` or `FAIL` for each check, in the same style as `flannel-recover.sh`. Settings can be overridden with environment variables (`TRAEFIK_VERSION`, `WHOAMI_VERSION`, `NODEPORT`, `LAB_IP`, `ROLLOUT_TIMEOUT`), and `render` prints the manifests. `down` lists what exists, deletes it, and checks that all seven objects are gone: the five the lab creates, **and the temporary `traefik-nodes-reader` ClusterRole and binding** if they were made by hand while diagnosing the missing `nodes` permission. `reset` runs `down` and then `up`, and **stops without applying anything** if the cleanup doesn't finish (a namespace still terminating would make the apply fail confusingly). `DELETE_TIMEOUT` (default 120 s) sets how long it waits.
+
+It does **not** do Step 1's pre-pull, because that needs `multipass exec` on the Windows host, and the master can't reach the workers. Without it, the kubelets pull the images when the Pods start, and the script waits. Run Step 1 first if you want the pull out of the way.
+
+**What was tested:** the script ran against a fake `kubectl` and `curl` in 26 scenarios (a fresh setup, a second run, `status`, a missing tag, a taken NodePort, an unreachable registry, a `NotReady` worker, `down` twice, an unreachable API, a Deployment that never starts, an image that cannot be found, warnings, routes that never appear, the overrides, `reset` (with the hand-made role present, on an empty cluster, and with a deletion that never finishes), the timing of the first clean run (`web2` and the second `whoami` Pod appearing late), and **a reproduction of the failure the first real run hit**: `nodes` forbidden, the client-go error lines, and every host answering 404), and `render` reproduces the two manifests in the appendices byte for byte. **The first version ran on the real cluster**, which is how the missing `nodes` permission was found (Section 13), and its Docker Hub check worked there. **The `reset` version ran there too: a clean start, then a second run that printed `unchanged` throughout (Section 13). The latest version, which polls instead of checking once, also ran there from a clean start and passed all 19 checks (Section 13).** It now checks that Traefik's ServiceAccount can list everything it watches, treats `forbidden` in Traefik's log as a failure when the routes don't work (and only as a warning when they do, since old errors stay in the log after a fix), keeps checking after a routing failure, and prints the Ingress description and the Traefik log by itself when a route doesn't appear.
+
+The sections below describe each step by hand, which is also what the script does.
+
 ## Step 1: pre-pull the images (PowerShell)
 
 ```powershell
 foreach ($w in "worker1","worker2") {
-  "== $w"
-  multipass exec $w -- sudo timeout 900 ctr -n k8s.io images pull docker.io/library/traefik:v3.7.12 2>&1 | Select-Object -Last 2
-  multipass exec $w -- sudo timeout 300 ctr -n k8s.io images pull docker.io/traefik/whoami:v1.11 2>&1 | Select-Object -Last 2
+  foreach ($img in "docker.io/library/traefik:v3.7.12","docker.io/traefik/whoami:v1.11") {
+    "== $w  $img"
+    $t = Get-Date
+    multipass exec $w -- sudo timeout 900 ctr -n k8s.io images pull $img
+    "   finished in {0:N0} s (exit code {1})" -f ((Get-Date) - $t).TotalSeconds, $LASTEXITCODE
+  }
 }
+```
+
+**What the output looks like.** `ctr` redraws a progress tree while it works, and without a terminal every redraw is printed as a new block, so the Traefik pull produces **hundreds of lines**. That is normal. The lines that matter are the last ones: `Completed pull from OCI Registry (...)` from `ctr`, and `finished in N s (exit code 0)` from the loop.
+
+**If the window stays busy after the pull should be over**, check on the VM before waiting any longer: `ps` for a `ctr` process, and `ctr -n k8s.io images ls -q`. Twice, a long Traefik pull had finished on the VM while the PowerShell window kept waiting (cause unknown, see Section 13). Press Ctrl+C and continue: nothing is left to clean up if no `ctr` process is running. Pulling is optional anyway, because `ingress-lab.sh` lets the kubelets pull what they need.
+
+**Don't filter the output with `Select-Object -Last 2` when you want to watch.** A first run did, and the window showed nothing at all until the pull ended, which looked like a hang. (An earlier version of this guide wrongly blamed `ctr` for that silence. The filter caused it: `ctr` prints progress all the time.) A filter is fine when you only want the result, as long as you know it is silent until the end.
+
+To see that data is arriving from a second window:
+
+```powershell
+function RX($vm) { [int64]((multipass exec $vm -- cat /proc/net/dev | Select-String "eth0") -replace '^.*eth0:\s*(\d+).*$','$1') }
+$a = RX "worker2"; Start-Sleep 10; $b = RX "worker2"
+"raw counter: $a -> $b | {0:N0} KiB/s" -f (($b-$a)/10/1024)
 ```
 
 | Expected | Meaning |
 |---|---|
-| Each pull ends with `Completed pull from OCI Registry (...)` and an elapsed time | About 52 MB and 7 MB. Under a minute each is likely, but registry speed varies |
-| `not found` for the Traefik tag | The tag doesn't exist: see Section 3 for the fallbacks |
+| A long progress tree, ending `Completed pull from OCI Registry (...)`, then `finished in N s (exit code 0)` | The image was downloaded. Traefik is about 52 MB and `whoami` about 3 MB. The first `whoami` pull took 2.3 s at 1.2 MiB/s, so Traefik should take under a minute if the speed holds, which is an extrapolation |
+| `already exists` on the lines shown, and a last line `Pulling from OCI Registry (...)` with a total of only tens of KB, in a second or two | **Probably a no-op, but not proof.** It can mean the image was already on the node, and it can also mean the earlier pull never finished. Check with `ctr -n k8s.io images ls -q`, and see Section 13 |
+| Exit code `124` | The `timeout` (15 minutes) stopped the pull |
+| Garbled tree characters such as `ΓööΓöÇ` | The console's code page, probably. Display only. `[Console]::OutputEncoding = [Text.Encoding]::UTF8` should fix it |
+| `not found` for a tag | The tag doesn't exist (it does, for Traefik: Section 13) |
 
 ## Step 2: deploy Traefik (master shell)
 
@@ -419,7 +464,7 @@ sha256sum traefik.yaml | cut -c1-16
 
 | Expected | |
 |---|---|
-| `134 traefik.yaml` and `339c864c1f7243fe` | The file is exactly the validated one. If either differs, **don't apply it** |
+| `135 traefik.yaml` and `bad01565e0ad226d` | The file is exactly the validated one. If either differs, **don't apply it** |
 
 ```bash
 kubectl apply -f traefik.yaml
@@ -436,7 +481,7 @@ kubectl auth can-i delete pods -A --as=system:serviceaccount:traefik:traefik-ing
 | Seven objects `created` | Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, IngressClass, Deployment, Service |
 | The rollout completes within seconds, and the Pod is `1/1 Running` on a **worker** | The image is cached |
 | The IngressClass | `traefik   traefik.io/ingress-controller` |
-| The log | A few `INFO` lines at startup. **Any `ERR` line is worth reading**: a wrong flag stops Traefik from starting |
+| The log | A few `INFO` lines at startup. **Read any `ERR` line, and any line that starts with `E` and a date such as `E1016`**: those are Kubernetes client errors, in a different format. A line saying `forbidden` means a missing permission, and a wrong flag stops Traefik from starting |
 | `can-i list secrets -A` | `yes` (Section 9) |
 | `can-i delete pods -A` | `no` |
 
@@ -500,10 +545,12 @@ These are expectations from how Traefik and Kubernetes normally behave. None has
 | `CrashLoopBackOff` | A wrong or unknown flag | `kubectl -n traefik logs deploy/traefik`: look for `ERR` |
 | `Running` but `0/1` | The readiness probe is failing: `/ping` on port 8080 | `kubectl -n traefik describe pod` (events), and the logs. A wrong entry-point or ping flag is the first suspect |
 | `curl` **hangs** | The pod network or a node address problem | `bash flannel-recover.sh --check` (the address-change guide), and try another node's address |
+| **404** for a host that has a rule, and the Traefik log full of **`... is forbidden`** lines | **Observed:** a missing RBAC rule (`nodes`). Traefik waits for all its watches before loading any route, so none loads | `kubectl -n traefik logs deploy/traefik \| grep forbidden`, and the permission check in `ingress-lab.sh`. Add the missing rule to the ClusterRole |
 | **404** for a host that has a rule | The Ingress isn't picked up: the IngressClass's controller string, `ingressClassName`, or RBAC | `kubectl get ingressclass`, `kubectl describe ingress -n ingress-lab host-routing`, the Traefik log |
 | 404 for **everything** before Step 3 | Expected: the routing table is empty | Create the Ingress |
 | **503** | A rule matched, but no Ready Pods | `kubectl -n ingress-lab get endpointslices` and `get pods` |
 | **502** | A Pod address was chosen but the connection failed | Pod network, or a port mismatch between the Service and the container |
+| `web2` or the load-sharing check fails once right after a fresh start, and passes minutes later | **Observed:** timing. Traefik learns the Pod addresses a moment after the Pods are Ready | Run `ingress-lab.sh status`. The script now waits (`ROUTE_TIMEOUT`, and 30 s for the load check) |
 | The Ingress `ADDRESS` is empty | Normal for a NodePort Service | Nothing |
 
 ---
@@ -529,10 +576,32 @@ These are expectations from how Traefik and Kubernetes normally behave. None has
 
 # 13. What is verified, and what is not
 
+## Observed so far
+
+These are the only facts in this guide that come from the cluster itself:
+
+- **`docker.io/library/traefik:v3.7.12` is present on worker1's image store** after the Step 1 pull, so the tag **exists on Docker Hub** and the pull from this cluster **works**. How long that pull took was not measured.
+- **`traefik/whoami:v1.11` pulled on worker1** in 2.3 s (`2.9 MiB`, 1.2 MiB/s as `ctr` reports it), 11 s of wall-clock time including the `multipass exec` overhead, exit code 0. The image is about 3 MB, not the 7 MB first estimated.
+- **`ctr` prints progress continuously** (hundreds of lines for Traefik, when run without a terminal). The first Step 1 attempt looked frozen only because of an output filter.
+- **worker2's Traefik pull ended on the VM while the PowerShell window stayed busy.** Afterwards: no `ctr` process, load average 0.02, zero I/O pressure, no containerd log entries in 30 minutes, and the containerd store at 1879 MB, unchanged over 10 seconds. `ctr images ls -q` lists `docker.io/library/traefik:v3.7.12` on worker2 and **not** `traefik/whoami`, whose pull (the next line of the loop) was never reached. The same thing had happened on worker1's Traefik pull. A short `whoami` pull returned normally. **The cause of the hang is not known**: my guess, untested, is that the hundreds of progress lines streamed through `multipass exec` trigger it.
+- **Not established:** whether the Traefik image on worker2 is complete and unpacked (`ctr -n k8s.io images check` has not been run on it). "Registered" is weaker than "complete".
+
+- **The first real run of `ingress-lab.sh`: stages 1 to 4 passed.** Both image tags exist (asked of the registry itself), the NodePort was free, the 7 objects were created, and Traefik rolled out on worker1. Its Pod became Ready, so **the readiness probe on `/ping`, port 8080, works** (`--ping=true` and the `traefik` entry point are right). Its log showed no `ERR` lines in Traefik's own format, and **an empty Traefik answered `404` for an unknown host**, through NodePort, the Service and the pod network.
+- **Stage 6 failed: `whoami.lab` answered 404 for 90 seconds.** Traefik's log was full of client-go lines (`E1016 ...`) saying `nodes is forbidden: User "system:serviceaccount:traefik:traefik-ingress-controller" cannot list resource "nodes"`. The ClusterRole had no `nodes` rule. My reading, not stated by the log: Traefik waits for all its watches to sync before it builds any routing table, so one failing watch means no routes at all.
+- **The first version of the script missed this.** Its log check looked for Traefik's own `ERR` format and so reported no errors, and its permission check only printed one informational line. Both are fixed.
+- **The fix worked, tested by hand.** A temporary ClusterRole granting `get`, `list` and `watch` on `nodes`, bound to Traefik's ServiceAccount, made `whoami.lab` answer **HTTP 200 on the very first poll**. The `forbidden` lines in the log stopped, and the log then showed `"GET / HTTP/1.1" 200 ... "ingress-lab-host-routing-whoami-lab@kubernetes" "http://10.244.1.125:80"`: a router built from the Ingress `host-routing` in `ingress-lab`, and a backend that is a **Pod address**, not the Service's ClusterIP.
+- **`web2.lab` answered `Name: app-two`**, so the `--name` flag works. The Pod saw `RemoteAddr` = the Traefik Pod, and `X-Forwarded-For` and `X-Real-Ip` of **`10.244.0.0`**, the master's flannel address: the NodePort hop rewrites the client address, as predicted. `X-Forwarded-Host: web2.lab`, `X-Forwarded-Proto: http`, `X-Forwarded-Port: 80` and `X-Forwarded-Server` named the Traefik Pod.
+- **The Ingress with `ingressClassName: traefik` was honoured**, so the IngressClass controller string works for this setup. Only an Ingress naming a *different* class would show whether the class is checked at all.
+- **A second flaw in the script, found before its next run:** old `forbidden` lines stay in the log after a fix, so a log check that counts them would report a false failure on a working cluster. The log check now runs last and counts them as a failure only when the routes don't work.
+- **`reset` worked on the real cluster.** It listed the 7 objects present (including the hand-made `traefik-nodes-reader` role), deleted them, checked that all 7 were gone, and the clean start created everything: 7 objects for Traefik, 6 for the apps. With the temporary role gone, the permission check passed, `whoami.lab` was routed and the Traefik log had no errors: **the permanent fix works from nothing.**
+- **The first clean run reported `16 passed, 1 failed, 2 warnings` in stage 6, and a second run minutes later passed everything**: every object `unchanged`, no `created`, `19 passed, 0 failed, 0 warnings`, `real 0m3.1s`. The first-run problems (only one `whoami` Pod reached, `web2` not routed once, and a `Name:` warning that blamed the flag for a response that never came from `web2`) were **timing in the script's one-shot checks**. That is an inference by elimination: nobody watched Traefik pick up the addresses late. The script now polls instead of checking once, and checks `Name:` only on a real `web2` answer.
+- **Cross-node traffic works.** Ten requests reached both `whoami` Pods, and one of them runs on worker2 while Traefik runs on worker1.
+- **The latest script passed from a clean start in a single run.** `reset` deleted the lab (the two temporary objects were already gone), confirmed all 7 absent, and the clean start created everything and finished with **`19 passed, 0 failed, 0 warnings`**, with Traefik on worker1 again. This is the acceptance test of the whole lab. What it does not show: the script does not log when its polling has to wait, so this run cannot tell whether stage 6 waited at all, and the "it was timing" explanation of the first clean run remains an inference.
+
 ## Checked while writing this guide
 
 - **Web research (October 15, 2026):** the retirement and archive of ingress-nginx; Traefik's documented RBAC and Deployment structure for the Ingress provider (v3.7 documentation); the ForwardAuth vulnerability and its fix version; the image sizes; the `whoami` tags
-- **Validation:** both manifests parse; the ClusterRole matches Traefik's documented rules rule for rule; each annotated excerpt in Section 5 equals the object in the real file; the two files have the line counts and checksums given above
+- **Validation:** both manifests parse; the ClusterRole matched the rules on Traefik's documentation page, which turned out to be **incomplete** (it has no `nodes`: see Observed so far); each annotated excerpt in Section 5 equals the object in the real file; the two files have the line counts and checksums given above
 
 ## Shown with real output in earlier guides on this cluster
 
@@ -542,21 +611,19 @@ These are expectations from how Traefik and Kubernetes normally behave. None has
 - RBAC bindings and the effect of `list` on Secrets (the RBAC and Secrets guides)
 - The pod network and the fixed master address (the address-change guide)
 
-## Not verified: these are the open questions the first run answers
+## Not verified: what is still open
 
-- That the Docker Hub tag `traefik:v3.7.12` exists
-- The IngressClass controller string `traefik.io/ingress-controller`
-- That `--ping=true` serves `/ping` on the `traefik` entry point at port 8080
-- That `whoami` accepts the `--name` flag
-- That an empty Traefik answers `404 page not found` through the NodePort
-- Traefik's 502 and 503 behaviour
-- The `X-Forwarded-*` values, and the rewritten client address
-- That the six requests split evenly between the two Pods
+- Traefik's **502 and 503** behaviour (the 404 has been observed)
+- That the requests split **evenly** between the two `whoami` Pods (the script only shows that both answered)
+- Whether the IngressClass is actually *checked*, as opposed to every Ingress being loaded
 - The exact flag for the `aliasHeadersStrategy` fix
+- Whether the polling in stage 6 ever has to wait on the real cluster: the script does not log it, so the "timing" explanation of the first clean run is still an inference
 
 ---
 
 # 14. Clean up
+
+`bash ingress-lab.sh down` does everything below and checks it, and `reset` follows it with a clean setup. The commands that follow are what it runs.
 
 ```bash
 kubectl delete -f apps.yaml
@@ -584,7 +651,7 @@ Consulted on October 15, 2026. Facts are paraphrased, and I read the OSV records
 
 | Topic | Source |
 |---|---|
-| Traefik's Ingress provider: the RBAC, a Deployment example, the annotations | Traefik documentation, "Kubernetes Ingress Routing Configuration" (doc.traefik.io, v3.7 documentation) |
+| Traefik's Ingress provider: the RBAC (which omitted `nodes`: see Section 5.3), a Deployment example, the annotations | Traefik documentation, "Kubernetes Ingress Routing Configuration" (doc.traefik.io, v3.7 documentation) |
 | The ingress-nginx retirement | CNCF blog, "Navigating the ingress-NGINX retirement" (July 2026); the Kubernetes SIG Network announcement of November 2025, as reported by several articles; a 2026 migration article (tech-insider.org) for the archive date of March 24, 2026 |
 | The Ingress API frozen, and Gateway API as the successor | Google Open Source Blog, "The End of an Era: Transitioning Away from Ingress NGINX" (February 2026) |
 | The ForwardAuth header-alias vulnerability and the fix in v3.7.12 | OSV records CVE-2026-88011 and CVE-2026-88879 (osv.dev) |
@@ -596,7 +663,7 @@ Consulted on October 15, 2026. Facts are paraphrased, and I read the OSV records
 
 # Appendix A: `traefik.yaml`
 
-134 lines, checksum prefix `339c864c1f7243fe`. This is the file validated before the lab.
+135 lines, checksum prefix `bad01565e0ad226d`. This is the file validated before the lab.
 
 ```yaml
 apiVersion: v1
@@ -620,6 +687,7 @@ rules:
   resources:
   - services
   - secrets
+  - nodes
   verbs:
   - get
   - list

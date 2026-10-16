@@ -15,6 +15,15 @@ The full step-by-step guide is in [`docs/`](docs/).
 | `docs/kubeadm-upgrade-walkthrough.md` | A real v1.35.9 to v1.36.5 upgrade, with console output and explanations |
 | `docs/kubernetes-services-guide.md` | Services: ClusterIP, NodePort, LoadBalancer, with real console output |
 | `docs/app-design-workload-controllers.md` | Labels and selectors, ReplicaSets, Deployments, DaemonSets, Jobs and CronJobs, with labs |
+| `docs/scheduling-guide.md` | Requests, limits, QoS, node affinity and topology spread, with real output |
+| `docs/probes-guide.md` | Readiness, liveness and startup probes, with real output |
+| `docs/hpa-guide.md` | metrics-server, the HPA's rules, scaling up and down, and `behavior`, with real output |
+| `docs/rbac-guide.md` | Roles, bindings, a certificate-based user, groups, anonymous access and escalation, with real output |
+| `docs/configmaps-secrets-guide.md` | ConfigMaps and Secrets: updates, failures, base64, etcd plaintext, and who can read them, with real output |
+| `docs/broken-kubelet-guide.md` | Four ways to break a kubelet, how each looks from the control plane, and how to find the cause, with real output |
+| `docs/dns-guide.md` | CoreDNS, the search path and `ndots`, DNS down against the network down, a Corefile typo, and custom names, with real output |
+| `docs/node-address-change-guide.md` | When the VMs' addresses change: the symptoms, stale flannel records, a permanent route, and the `netplan apply` trap, with real output |
+| `docs/ingress-traefik-guide.md` | Ingress with Traefik: what the 7 objects do and how a request flows. Written before the first run, so outputs are expected, not observed. Includes `docs/images/traefik-step2-flow.gif` |
 | `scripts/create-vms.ps1` | Create the three VMs (Windows PowerShell) |
 | `scripts/common.sh` | Steps 1-3: prepare node, install containerd, kubeadm, kubelet, kubectl |
 | `scripts/setup-common.ps1` | Copy and run `common.sh` on all VMs |
@@ -22,6 +31,10 @@ The full step-by-step guide is in [`docs/`](docs/).
 | `scripts/pin-ip.ps1` | Copies `pin-ip.sh` into a VM and runs it |
 | `scripts/host-alias.ps1` | Run as Administrator after a Windows reboot if the Hyper-V Default Switch changed subnet |
 | `scripts/apply-manifest.ps1` | Copy a YAML file into the master and `kubectl apply` it |
+| `scripts/check-clocks.ps1` | Compare each VM's clock with Windows (`-Fix` restarts the time service first) |
+| `scripts/flannel-recover.sh` | After the nodes' addresses change: repair stale flannel records and verify pods, DNS and metrics (run on the master) |
+| `scripts/route-to-master.sh` | Give a worker a permanent direct route to the master's fixed address, so a subnet change cannot cut it off. Does not run `netplan apply` (run on each worker) |
+| `scripts/ingress-lab.sh` | Set up, check (`status`), remove (`down`) or restart from clean (`reset`) the Ingress lab: Traefik, two test apps and an Ingress. Idempotent. Run on the master |
 | `scripts/git-hooks/pre-commit` | Blocks commits that add private keys, kubeconfig credentials, AWS keys, join tokens or GitHub tokens |
 | `scripts/install-hooks.sh` | One-time installer for the git hook |
 | `manifests/` | Example Deployment, Service and scheduling-test pods |
