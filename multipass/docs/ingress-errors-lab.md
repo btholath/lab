@@ -146,7 +146,7 @@ multipass transfer ingress-errors-lab.sh master:/home/ubuntu/
 multipass exec master -- bash /home/ubuntu/ingress-errors-lab.sh
 ```
 
-It is safe to repeat. A second run prints `unchanged`, and it restores `ok` to 1 replica and `zero` to 0 first, because `kubectl apply` does not undo a manual scale.
+It is safe to repeat. A second run prints `unchanged`, and it first scales `ok` back to 1 replica and `zero` back to 0 **explicitly**, so a repeat run (or an interrupted timing test) starts from a known state. It does not rely on what `kubectl apply` would do with a manual scale: I assumed it would leave one alone, never tested that, and now think it probably resets it. Observed on October 19: the repeat run printed `unchanged` for every object and started cleanly.
 
 | Stage | Expected |
 |---|---|
@@ -171,7 +171,7 @@ It runs after the main run (it needs `errors-lab`). **It changes Traefik's own D
 3. Probes again. Predicted: `ok` **200**, `zero` **503**, `notready` **503**, and `nosvc` still **404** (the Service does not exist, so there is nothing to make an empty route for: this one is my inference, not documented).
 4. **Removes the argument again** and checks that `zero` is back to 404.
 
-**Observed (October 19):** every prediction held, the flag was added, Traefik restarted, the flag was removed again, and `zero` returned to 404.
+**Observed (October 19):** every prediction held, the flag was added, Traefik restarted, the flag was removed again, and `zero` returned to 404. Afterwards, `bash ingress-lab.sh` printed `deployment.apps/traefik unchanged` and `19 passed, 0 failed, 0 warnings`: apply found no difference between Traefik's live Deployment and its manifest, so the revert left nothing behind.
 
 Safety: an exit trap removes the flag even if the script fails halfway, and the script checks at the end that it is gone. If the flag was already on when it started, it says so and **leaves it as it found it**. If anything goes wrong, `bash ingress-lab.sh reset` restores Traefik from its manifest.
 

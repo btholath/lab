@@ -393,7 +393,8 @@ cmd_run() {
   printf '%s\n' "$out" | indent
   if [ $rc -ne 0 ]; then bad "kubectl apply failed"; summary; return 1; fi
   ok "errors-lab applied"
-  # kubectl apply does not undo a manual scale, so a repeat run (or an interrupted timing test) starts here
+  # Put both replica counts back explicitly, so a repeat run (or an interrupted timing test) starts from a known
+  # state. This does not rely on what kubectl apply would do with a manual scale, which was never tested here.
   kubectl -n errors-lab scale deploy/ok --replicas=1 >/dev/null 2>&1 </dev/null
   kubectl -n errors-lab scale deploy/zero --replicas=0 >/dev/null 2>&1 </dev/null
   if kubectl -n errors-lab rollout status deploy/ok --timeout="${ROLLOUT_TIMEOUT}s" >/dev/null 2>&1; then ok "ok is Ready"; else

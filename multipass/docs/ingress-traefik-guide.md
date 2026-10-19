@@ -4,7 +4,7 @@
 
 > **Status: written before the first run.** Nothing in this guide has been executed on the cluster yet. Every output shown is **Expected**, a prediction, and none is **Observed**, apart from the few facts listed under *Observed so far* in Section 13. The manifests were checked with a YAML parser and the RBAC rules were compared with Traefik's own documentation, but a manifest that parses can still fail on a real cluster. After the labs are run, the *Expected* blocks should be replaced with real output, and the "What is verified" section updated.
 
-![The four scenes: send, objects, Pod starts, traffic](traefik-step2-flow.gif)
+![The four scenes: send, objects, Pod starts, traffic](images/traefik-step2-flow.gif)
 
 *The animation above (`traefik-step2-flow.gif`) walks through Sections 5 to 8: the 7 objects, how a Pod appears, and the path of a request.*
 
