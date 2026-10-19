@@ -24,6 +24,7 @@ The full step-by-step guide is in [`docs/`](docs/).
 | `docs/dns-guide.md` | CoreDNS, the search path and `ndots`, DNS down against the network down, a Corefile typo, and custom names, with real output |
 | `docs/node-address-change-guide.md` | When the VMs' addresses change: the symptoms, stale flannel records, a permanent route, and the `netplan apply` trap, with real output |
 | `docs/ingress-traefik-guide.md` | Ingress with Traefik: what the 7 objects do and how a request flows. Written before the first run, so outputs are expected, not observed. Includes `docs/images/traefik-step2-flow.gif` |
+| `docs/ingress-errors-lab.md` | The 404/503/502 lab: what each status means, the first run's results (a Service with no ready Pods gets a 404, not a 503, by default), the documented reason, and what is still open |
 | `scripts/create-vms.ps1` | Create the three VMs (Windows PowerShell) |
 | `scripts/common.sh` | Steps 1-3: prepare node, install containerd, kubeadm, kubelet, kubectl |
 | `scripts/setup-common.ps1` | Copy and run `common.sh` on all VMs |
@@ -35,6 +36,7 @@ The full step-by-step guide is in [`docs/`](docs/).
 | `scripts/flannel-recover.sh` | After the nodes' addresses change: repair stale flannel records and verify pods, DNS and metrics (run on the master) |
 | `scripts/route-to-master.sh` | Give a worker a permanent direct route to the master's fixed address, so a subnet change cannot cut it off. Does not run `netplan apply` (run on each worker) |
 | `scripts/ingress-lab.sh` | Set up, check (`status`), remove (`down`) or restart from clean (`reset`) the Ingress lab: Traefik, two test apps and an Ingress. Idempotent. Run on the master |
+| `scripts/ingress-errors-lab.sh` | Makes Traefik answer 404, 503 and 502 on purpose in its own namespace (`errors-lab`), records the status and Traefik's access-log fields for each, and times scale-downs and scale-ups. `flag` turns Traefik's `allowEmptyServices` on, re-probes and turns it off again. `down` removes it. Needs the Ingress lab up |
 | `scripts/git-hooks/pre-commit` | Blocks commits that add private keys, kubeconfig credentials, AWS keys, join tokens or GitHub tokens |
 | `scripts/install-hooks.sh` | One-time installer for the git hook |
 | `manifests/` | Example Deployment, Service and scheduling-test pods |

@@ -4,7 +4,7 @@
 
 > **Status: written before the first run.** Nothing in this guide has been executed on the cluster yet. Every output shown is **Expected**, a prediction, and none is **Observed**, apart from the few facts listed under *Observed so far* in Section 13. The manifests were checked with a YAML parser and the RBAC rules were compared with Traefik's own documentation, but a manifest that parses can still fail on a real cluster. After the labs are run, the *Expected* blocks should be replaced with real output, and the "What is verified" section updated.
 
-![The four scenes: send, objects, Pod starts, traffic](images/traefik-step2-flow.gif)
+![The four scenes: send, objects, Pod starts, traffic](traefik-step2-flow.gif)
 
 *The animation above (`traefik-step2-flow.gif`) walks through Sections 5 to 8: the 7 objects, how a Pod appears, and the path of a request.*
 
@@ -137,7 +137,7 @@ rules:
 
 | Rule | In plain words |
 |---|---|
-| `services`, `secrets`, `nodes`: get, list, watch | Read Services (to find where traffic can go), **Secrets** (TLS certificates) in **every** namespace, and the cluster's **Nodes**. Traefik's Kubernetes provider watches Nodes, and **without this rule it never loads a single route** (observed, Section 13) |
+| `services`, `secrets`, `nodes`: get, list, watch | Read Services (to find where traffic can go), **Secrets** (TLS certificates) in **every** namespace, and the cluster's **Nodes**. Traefik's Kubernetes provider discovers cluster-scoped resources, `IngressClass` and `Nodes`, by default (its documentation says so), and **without this rule it never loads a single route** (observed, Section 13). The option `disableClusterScopeResources` would remove the need, but then Ingresses that use an IngressClass are ignored, and ours do |
 | `endpointslices`: get, list, watch | Read which Pod addresses currently stand behind each Service |
 | `ingresses`, `ingressclasses`: get, list, watch | Read the routing rules, and which controller each one is meant for |
 | `ingresses/status`: update | Write an address back into an Ingress's status |
@@ -174,7 +174,7 @@ spec:
   controller: traefik.io/ingress-controller
 ```
 
-An Ingress says `ingressClassName: traefik` to state which controller should handle it, and this object says who that is. **Caveat:** the controller string `traefik.io/ingress-controller` is from my recollection of Traefik's convention. The documentation page I read does not show an IngressClass. If an Ingress with `ingressClassName: traefik` is ignored, this string is the first suspect.
+An Ingress says `ingressClassName: traefik` to state which controller should handle it, and this object says who that is. Traefik's documentation says that for an Ingress with `ingressClassName`, it looks for an IngressClass whose controller is `traefik.io/ingress-controller`, and the real run confirmed it: an Ingress with `ingressClassName: traefik` was picked up. (I first wrote this string from memory, and it turned out to be right.)
 
 ## 5.6 Deployment: the recipe for the Pod
 
@@ -360,10 +360,10 @@ What the answers mean:
 |---|---|
 | The `whoami` page (hostname, headers) | The route worked |
 | **404** `404 page not found` | **No rule matched** the Host and path. Traefik answered itself, and no Pod was involved |
-| **503** | A rule matched, but the Service had **no Ready Pods** to send to |
+| **503** | A route exists, but its Service has no servers. **With Traefik's default settings, a Service with no ready Pods gets no route at all, so the answer is a 404, not a 503** (observed in the errors lab, `ingress-errors-lab.md`; the provider option `allowEmptyServices` changes this). A 503 was seen only for about 2 seconds after a working app was scaled to 0, and then it became a 404. With `allowEmptyServices` on, the 503 is permanent (observed, with the body `no available server`) |
 | **502** | A rule matched, a Pod address was chosen, and **the connection to it failed** |
 
-The 404, 503 and 502 behaviour is my expectation of Traefik's defaults, not something observed here yet.
+The 404 and 502 behaviour has been observed (the errors lab): a 404 when no route matches, and a **502** when a Service's `targetPort` has nothing listening, with the failed port visible in Traefik's access log. The 503 is the surprising one: see the row above.
 
 **Two things to look for in the page.** Traefik adds `X-Forwarded-*` headers (host, protocol, server) and `X-Real-Ip`. The client address in them is probably a `10.244.x.x` address and **not yours**: a request that enters on one node's NodePort and leaves toward a Pod on another node has its source address rewritten on the way (the Service's default traffic policy), so the real client address is lost. Keeping it needs `externalTrafficPolicy: Local`, which this lab doesn't use. That is an inference from how NodePort works.
 
@@ -546,9 +546,10 @@ These are expectations from how Traefik and Kubernetes normally behave. None has
 | `Running` but `0/1` | The readiness probe is failing: `/ping` on port 8080 | `kubectl -n traefik describe pod` (events), and the logs. A wrong entry-point or ping flag is the first suspect |
 | `curl` **hangs** | The pod network or a node address problem | `bash flannel-recover.sh --check` (the address-change guide), and try another node's address |
 | **404** for a host that has a rule, and the Traefik log full of **`... is forbidden`** lines | **Observed:** a missing RBAC rule (`nodes`). Traefik waits for all its watches before loading any route, so none loads | `kubectl -n traefik logs deploy/traefik \| grep forbidden`, and the permission check in `ingress-lab.sh`. Add the missing rule to the ClusterRole |
+| **404** for a host whose Ingress looks right, and the Service has **no ready Pods** | **Observed:** with Traefik's default `allowEmptyServices: false`, no route is built for a Service with no available endpoint. Traefik's access log shows `router=-`, exactly as for a route that does not match | `kubectl get pods` (READY `0/1`?), `kubectl get endpointslices` |
 | **404** for a host that has a rule | The Ingress isn't picked up: the IngressClass's controller string, `ingressClassName`, or RBAC | `kubectl get ingressclass`, `kubectl describe ingress -n ingress-lab host-routing`, the Traefik log |
 | 404 for **everything** before Step 3 | Expected: the routing table is empty | Create the Ingress |
-| **503** | A rule matched, but no Ready Pods | `kubectl -n ingress-lab get endpointslices` and `get pods` |
+| **503** | A route exists but its Service has no servers. Seen for about 2 seconds after scaling a working app to 0, after which it became a 404. With `allowEmptyServices` on it is permanent (observed). With the defaults, a Service that never had a ready Pod gives a **404** instead | `kubectl -n ingress-lab get endpointslices` and `get pods` |
 | **502** | A Pod address was chosen but the connection failed | Pod network, or a port mismatch between the Service and the container |
 | `web2` or the load-sharing check fails once right after a fresh start, and passes minutes later | **Observed:** timing. Traefik learns the Pod addresses a moment after the Pods are Ready | Run `ingress-lab.sh status`. The script now waits (`ROUTE_TIMEOUT`, and 30 s for the load check) |
 | The Ingress `ADDRESS` is empty | Normal for a NodePort Service | Nothing |
@@ -597,6 +598,13 @@ These are the only facts in this guide that come from the cluster itself:
 - **The first clean run reported `16 passed, 1 failed, 2 warnings` in stage 6, and a second run minutes later passed everything**: every object `unchanged`, no `created`, `19 passed, 0 failed, 0 warnings`, `real 0m3.1s`. The first-run problems (only one `whoami` Pod reached, `web2` not routed once, and a `Name:` warning that blamed the flag for a response that never came from `web2`) were **timing in the script's one-shot checks**. That is an inference by elimination: nobody watched Traefik pick up the addresses late. The script now polls instead of checking once, and checks `Name:` only on a real `web2` answer.
 - **Cross-node traffic works.** Ten requests reached both `whoami` Pods, and one of them runs on worker2 while Traefik runs on worker1.
 - **The latest script passed from a clean start in a single run.** `reset` deleted the lab (the two temporary objects were already gone), confirmed all 7 absent, and the clean start created everything and finished with **`19 passed, 0 failed, 0 warnings`**, with Traefik on worker1 again. This is the acceptance test of the whole lab. What it does not show: the script does not log when its polling has to wait, so this run cannot tell whether stage 6 waited at all, and the "it was timing" explanation of the first clean run remains an inference.
+- **The errors lab (first run): six of eight predictions held.** `unknown`, `paths-other` and `nosvc` gave 404 with no router in Traefik's access log. `refused` gave **502** (`Bad Gateway`) with the backend `http://<Pod>:81`, the port where nothing listens. `ok` and `paths-only` gave 200. **`zero` and `notready` gave 404, not the predicted 503**, and still did after 20 seconds, with `router=-`: Traefik had built no route.
+- **The documented reason:** the Ingress provider's option `allowEmptyServices` is off by default. Off means no route for a Service with no available endpoint, so a 404. On means a route that answers 503. The FAQ's 503 rule applies once a route exists. So, with the defaults, **a 404 can mean either "no route matches" or "the Service has no ready Pods"**.
+- **The documented option works, observed (the `flag` run, October 19):** with `--providers.kubernetesingress.allowemptyservices=true`, `zero` and `notready` answered **503** with the body `no available server`, a router named and `backend=-`, while a Service that does not exist stayed 404. Traefik v3.7.12 accepted that exact command-line form. Removing the flag restored the 404s. The Ingress lab leaves the option off.
+- **One hang, not explained:** during one scale-down (`zero` to 0) a poll received no answer for about 8 seconds (curl's limit) before the 404. It was seen once, in an app with no readiness probe, and not in two scale-downs of an app that has one. Its cause is not established.
+- **The three bodies, all observed:** `404 page not found`, `no available server` (503) and `Bad Gateway` (502).
+- **Timing:** scaling a working app to 0 gave `200 → 503 → 404`: the 503 appeared after 0.6 s and **lasted about 2 seconds**, then the status settled at 404 (one repeat run, October 19). Back to 1 gave `404 → 200` in 1.1 s. A Service that never had a Pod got a route when its first Pod became Ready: `404 → 200` in 2.1 s.
+- **Other documented facts found on the way** (Traefik v3.7 provider reference): Traefik discovers `IngressClass` and `Nodes` by default, which is why `nodes` is needed; `providersThrottleDuration` defaults to 2 s, a documented delay between a Kubernetes change and Traefik acting on it, which fits the first clean run's timing; `strictPrefixMatching` is off by default, so a prefix `/only` also matches `/onlyfoo`, which matters for a path lab.
 
 ## Checked while writing this guide
 
@@ -613,7 +621,7 @@ These are the only facts in this guide that come from the cluster itself:
 
 ## Not verified: what is still open
 
-- Traefik's **502 and 503** behaviour (the 404 has been observed)
+- Why the 503 lasts about 2 seconds after a scale-down, and what caused a single 8-second hang during one scale-down (the errors lab). Neither mechanism was established
 - That the requests split **evenly** between the two `whoami` Pods (the script only shows that both answered)
 - Whether the IngressClass is actually *checked*, as opposed to every Ingress being loaded
 - The exact flag for the `aliasHeadersStrategy` fix
@@ -652,6 +660,7 @@ Consulted on October 15, 2026. Facts are paraphrased, and I read the OSV records
 | Topic | Source |
 |---|---|
 | Traefik's Ingress provider: the RBAC (which omitted `nodes`: see Section 5.3), a Deployment example, the annotations | Traefik documentation, "Kubernetes Ingress Routing Configuration" (doc.traefik.io, v3.7 documentation) |
+| The Ingress provider's options (`allowEmptyServices`, `disableClusterScopeResources`, `providersThrottleDuration`, `strictPrefixMatching`, the IngressClass lookup) and the FAQ on 404, 503 and 502 | Traefik documentation v3.7, the Kubernetes Ingress provider reference and the FAQ |
 | The ingress-nginx retirement | CNCF blog, "Navigating the ingress-NGINX retirement" (July 2026); the Kubernetes SIG Network announcement of November 2025, as reported by several articles; a 2026 migration article (tech-insider.org) for the archive date of March 24, 2026 |
 | The Ingress API frozen, and Gateway API as the successor | Google Open Source Blog, "The End of an Era: Transitioning Away from Ingress NGINX" (February 2026) |
 | The ForwardAuth header-alias vulnerability and the fix in v3.7.12 | OSV records CVE-2026-88011 and CVE-2026-88879 (osv.dev) |
