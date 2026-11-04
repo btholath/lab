@@ -30,6 +30,11 @@ ingress() {
     kubectl apply -f "$INGRESS_MANIFEST"
   fi
   kubectl -n ingress-nginx wait --for=condition=available deployment/ingress-nginx-controller --timeout=$TIMEOUT
+  # The Deployment reports "available" before its pod exists (maxUnavailable is 1), so wait for the pod to appear first.
+  for _ in $(seq 1 90); do
+    kubectl -n ingress-nginx get pod -l app.kubernetes.io/component=controller -o name 2>/dev/null | grep -q . && break
+    sleep 2
+  done
   kubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=$TIMEOUT
   # Local dev only: the admission webhook is flaky on kind/WSL2 ("connection refused") and not needed here.
   kubectl delete validatingwebhookconfiguration ingress-nginx-admission --ignore-not-found
