@@ -1,0 +1,26 @@
+# Optional, local Octopus Deploy server for practising release management inside WSL.
+#   docker compose -f deploy/octopus/docker-compose.yml up -d     -> http://localhost:8081
+# Octopus needs a license key even for the free tier: request one at octopus.com, then put it in .env
+# (OCTOPUS_LICENSE_B64=...). See docs/confluence/05-release-runbook.md.
+name: wealthwise-octopus
+services:
+  octopus-db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${OCTOPUS_DB_PASSWORD:-Passw0rd!Octo1}"
+    volumes: [octodb:/var/opt/mssql]
+  octopus:
+    image: octopusdeploy/octopusdeploy:latest
+    privileged: true
+    environment:
+      ACCEPT_EULA: "Y"
+      DB_CONNECTION_STRING: "Server=octopus-db;Database=OctopusDeploy;User Id=sa;Password=${OCTOPUS_DB_PASSWORD:-Passw0rd!Octo1};TrustServerCertificate=True"
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: "${OCTOPUS_ADMIN_PASSWORD:-Admin!Passw0rd1}"
+      ADMIN_EMAIL: admin@example.com
+      OCTOPUS_SERVER_BASE64_LICENSE: "${OCTOPUS_LICENSE_B64:-}"
+    ports: ["8081:8080"]
+    depends_on: [octopus-db]
+volumes:
+  octodb:

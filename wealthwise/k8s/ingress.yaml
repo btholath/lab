@@ -1,0 +1,17 @@
+# One front door. nginx in the web pod serves the SPA and forwards /api to Kong,
+# so the gateway key never reaches the browser.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wealthwise
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: { number: 80 }

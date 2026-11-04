@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: wealthwise
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - elasticmq.yaml
+  - api.yaml
+  - kong.yaml
+  - web.yaml
+  - ingress.yaml
+
+# Same files docker-compose uses. Changing either rolls the pods automatically (hashed ConfigMap names).
+# Build with: kubectl kustomize --load-restrictor LoadRestrictionsNone k8s
+configMapGenerator:
+  - name: kong-config
+    files:
+      - kong.yml=../gateway/kong.yml
+  - name: elasticmq-config
+    files:
+      - elasticmq.conf=../messaging/elasticmq.conf

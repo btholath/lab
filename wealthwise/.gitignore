@@ -1,0 +1,11 @@
+bin/
+obj/
+node_modules/
+dist/
+.angular/
+.vs/
+.idea/
+*.user
+TestResults/
+coverage/
+.env

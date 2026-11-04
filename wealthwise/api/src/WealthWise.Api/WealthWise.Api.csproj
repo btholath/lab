@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="..\WealthWise.Application\WealthWise.Application.csproj" />
+    <ProjectReference Include="..\WealthWise.Infrastructure\WealthWise.Infrastructure.csproj" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.*" />
+  </ItemGroup>
+</Project>

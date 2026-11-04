@@ -1,0 +1,59 @@
+name: wealthwise
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: wealthwise
+      POSTGRES_USER: wealthwise
+      POSTGRES_PASSWORD: wealthwise
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wealthwise -d wealthwise"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # SQS-compatible queue, free and tiny. Swap QueueUrl/ServiceUrl for real AWS SQS with no code change.
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.6.11
+    volumes: ["./messaging/elasticmq.conf:/opt/elasticmq.conf:ro"]
+    ports: ["9324:9324"]
+
+  api:
+    build: { context: ., dockerfile: api/Dockerfile }
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Database=wealthwise;Username=wealthwise;Password=wealthwise"
+      Sqs__ServiceUrl: "http://elasticmq:9324"
+      Sqs__QueueUrl: "http://elasticmq:9324/000000000000/wealthwise-trades"
+      Sqs__Region: "us-east-1"
+    ports: ["5080:8080"]          # direct access for debugging; normal traffic goes via Kong
+    depends_on:
+      postgres: { condition: service_healthy }
+      elasticmq: { condition: service_started }
+
+  kong:
+    image: kong:3.8
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+    volumes: ["./gateway/kong.yml:/kong/declarative/kong.yml:ro"]
+    ports:
+      - "${KONG_PORT:-8800}:8000"   # 8800: port 8000 is often taken (e.g. Splunk)
+      - "127.0.0.1:8001:8001"     # admin API, loopback only
+    depends_on: [api]
+
+  web:
+    build: { context: ., dockerfile: web/Dockerfile }
+    ports: ["4200:80"]
+    depends_on: [kong]
+
+volumes:
+  pgdata:

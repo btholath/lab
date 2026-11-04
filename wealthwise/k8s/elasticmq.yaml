@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticmq
+spec:
+  selector: { app: elasticmq }
+  ports:
+    - { name: sqs, port: 9324, targetPort: 9324 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: elasticmq }
+  template:
+    metadata:
+      labels: { app: elasticmq }
+    spec:
+      enableServiceLinks: false   # avoid injected KONG_PORT=tcp://... style env vars
+      containers:
+        - name: elasticmq
+          image: softwaremill/elasticmq-native:1.6.11
+          ports:
+            - { name: sqs, containerPort: 9324 }
+          readinessProbe:
+            tcpSocket: { port: 9324 }
+            periodSeconds: 3
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /opt/elasticmq.conf, subPath: elasticmq.conf }
+      volumes:
+        - name: config
+          configMap: { name: elasticmq-config }

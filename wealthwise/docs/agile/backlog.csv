@@ -1,0 +1,33 @@
+Issue Id,Parent,Summary,Issue Type,Priority,Story Points,Labels,Status,Description
+E1,,Portfolio visibility,Epic,High,,portfolio,In Progress,"Advisors can see value, allocation and drift for every account."
+E2,,Trade execution,Epic,High,,trading,In Progress,Place and audit trades with business-rule protection.
+E3,,Rebalancing,Epic,Medium,,rebalancing,In Progress,Propose trades that return a portfolio to its mandate.
+E4,,API-led platform,Epic,Medium,,"platform,api",In Progress,"Gateway, contracts, versioning and observability."
+E5,,Delivery pipeline,Epic,Medium,,devops,In Progress,"CI, release automation and environment promotion."
+E6,,AWS cloud readiness,Epic,Low,,aws,To Do,Containerized services deployed on AWS with serverless event handling.
+S1,E1,View all portfolios with value and gain,Story,High,3,portfolio,Done,"As an advisor I want a list of accounts with value, unrealized gain and drift so I can see who needs attention.
+AC: list sorted by name; drift flagged when above 5 percentage points."
+S2,E1,View allocation against target for one portfolio,Story,High,5,"portfolio,ui",Done,"As an advisor I want actual versus target weights by asset class so I can explain drift to a client.
+AC: target tick, out-of-band highlight, accessible text alternative."
+S3,E1,View holdings with cost basis and gain,Story,Medium,3,portfolio,Done,Average-cost basis; values refresh every 15 seconds.
+S4,E2,Execute a buy or sell at market,Story,High,8,trading,Done,AC: rejects buys above cash (422); rejects sells above position (422); updates cash and cost basis; records trade.
+S5,E2,Concurrent trades cannot overspend cash,Story,High,3,"trading,resilience",Done,Optimistic concurrency on the portfolio aggregate; API returns 409 on conflict.
+S6,E2,Audit trail of trade events,Story,Medium,5,"trading,events",Done,Trade events published to SQS after commit; consumer writes audit rows idempotently.
+S7,E3,Propose a threshold rebalance,Story,High,5,rebalancing,Done,Only classes outside a configurable band are traded.
+S8,E3,Propose a full rebalance,Story,Medium,2,rebalancing,Done,Strategy pattern; cash funds the shortfall.
+S9,E3,Preview projected allocation after proposed trades,Story,Medium,3,"rebalancing,ui",Done,Ring marker on the drift strip.
+S10,E3,Execute a proposed rebalance as a basket,Story,High,8,"rebalancing,trading",To Do,"Needs security-level proposals (lot selection, tax awareness) and an order basket."
+S11,E3,Tax-aware lot selection when selling,Story,Medium,13,"rebalancing,tax",To Do,Spike first: HIFO vs specific-lot; wash-sale rules.
+S12,E4,Gateway authentication and rate limiting,Story,High,5,"platform,security",Done,Kong key-auth and rate-limiting; keys never in the browser bundle.
+S13,E4,Publish OpenAPI contract and version policy,Story,Medium,3,"platform,api",In Progress,OpenAPI served at /openapi/v1.json; add contract tests and a /v2 deprecation policy.
+S14,E4,Replace API key with OIDC and JWT validation at the gateway,Story,High,8,"platform,security",To Do,Keycloak container locally; Cognito on AWS.
+S15,E4,Structured logging with correlation ids,Story,Medium,3,observability,In Progress,Kong adds X-Correlation-ID; propagate into API logs and queue messages.
+S16,E5,"CI: build, test, smoke on every PR",Story,High,5,devops,Done,"GitHub Actions: api tests, web build, full-stack smoke through the gateway."
+S17,E5,Release images and promote with Octopus,Story,Medium,5,"devops,octopus",In Progress,Tag push builds images; Octopus creates a release and deploys to Staging.
+S18,E5,Front-end unit and component tests,Story,Medium,5,"testing,ui",To Do,Add Vitest or Karma with ChromeHeadless; cover DriftBar and trade ticket validation.
+S19,E6,Deploy API and web to ECS Fargate,Story,Medium,8,"aws,containers",To Do,Terraform or CDK; ALB; secrets in Secrets Manager; Aurora PostgreSQL.
+S20,E6,Move the audit consumer to Lambda on an SQS trigger,Story,Medium,5,"aws,serverless",To Do,"Same handler code, partial batch failure response, DLQ with alarm."
+B1,E2,Quantity field accepts values with more than 6 decimal places,Bug,Low,1,trading,To Do,Validate precision at the API boundary rather than relying on database rounding.
+S21,E5,Deploy the stack to a local Kubernetes cluster (kind),Story,High,5,"devops,kubernetes",Done,"Kustomize manifests, ingress-nginx, probes, resource limits, non-root API container. AC: app reachable at http://localhost:8080; make k8s-smoke passes."
+S22,E4,Log rule violations quietly,Story,Medium,2,"observability,api",Done,"422/404/409 responses are logged at Information/Warning; only unexpected exceptions log as errors."
+S23,E5,Harden local Kubernetes workflow for WSL2 and Docker 29,Story,Medium,3,"devops,kubernetes",Done,"Single-platform image import, Kong single worker and memory limit, webhook handling, 15-minute waits, configurable Kong port."

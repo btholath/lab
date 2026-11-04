@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WealthWise.Domain/WealthWise.Domain.csproj" />
+    <Project Path="src/WealthWise.Application/WealthWise.Application.csproj" />
+    <Project Path="src/WealthWise.Infrastructure/WealthWise.Infrastructure.csproj" />
+    <Project Path="src/WealthWise.Api/WealthWise.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WealthWise.Tests/WealthWise.Tests.csproj" />
+  </Folder>
+</Solution>

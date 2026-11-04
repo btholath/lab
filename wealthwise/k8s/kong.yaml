@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kong
+spec:
+  selector: { app: kong }
+  ports:
+    - { name: proxy, port: 8000, targetPort: 8000 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kong
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: kong }
+  template:
+    metadata:
+      labels: { app: kong }
+    spec:
+      enableServiceLinks: false   # avoid injected KONG_PORT=tcp://... style env vars
+      containers:
+        - name: kong
+          image: kong:3.8
+          ports:
+            - { name: proxy, containerPort: 8000 }
+          env:
+            - { name: KONG_DATABASE, value: "off" }
+            - { name: KONG_DECLARATIVE_CONFIG, value: /kong/declarative/kong.yml }
+            # One worker: nginx defaults to one per host CPU, which got the pod OOM-killed on many-core machines.
+            - { name: KONG_NGINX_WORKER_PROCESSES, value: "1" }
+            - { name: KONG_NGINX_EVENTS_WORKER_CONNECTIONS, value: "1024" }
+            - { name: KONG_PROXY_LISTEN, value: "0.0.0.0:8000" }
+            - { name: KONG_ADMIN_LISTEN, value: "off" }        # no admin API in the cluster
+            - { name: KONG_PROXY_ACCESS_LOG, value: /dev/stdout }
+            - { name: KONG_PROXY_ERROR_LOG, value: /dev/stderr }
+          readinessProbe:
+            tcpSocket: { port: 8000 }
+            periodSeconds: 3
+          livenessProbe:
+            tcpSocket: { port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: config, mountPath: /kong/declarative, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: kong-config }
