@@ -2,7 +2,7 @@
 
 ## Flow
 1. PR merged to `main` and CI is green (api tests, web build, full-stack smoke test).
-2. Tag the commit: `git tag v1.4.0 && git push origin v1.4.0`.
+2. Tag the commit: `git tag wealthwise-v1.4.0 && git push origin wealthwise-v1.4.0`.
 3. The **Release** workflow builds `wealthwise-api` and `wealthwise-web` images and pushes them to GHCR with the version tag.
 4. If the repository variable `OCTOPUS_URL` is set, the workflow creates an Octopus release and deploys it to **Staging**.
 5. Promote to **Production** in Octopus after the manual approval step.

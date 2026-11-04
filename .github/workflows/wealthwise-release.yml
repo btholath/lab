@@ -1,10 +1,10 @@
-name: Release
+name: WealthWise Release
 
 # Builds versioned images, then hands the release to Octopus Deploy.
 # Octopus steps are skipped until the OCTOPUS_URL repository variable is set, so forks stay green.
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["wealthwise-v*.*.*"]
   workflow_dispatch:
 
 permissions:
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_REF_NAME#wealthwise-v}" >> "$GITHUB_OUTPUT"
         if: startsWith(github.ref, 'refs/tags/')
       - id: v2
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -34,15 +34,15 @@ jobs:
       - name: Build and push api
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: api/Dockerfile
+          context: wealthwise
+          file: wealthwise/api/Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/wealthwise-api:${{ steps.v.outputs.version || steps.v2.outputs.version }}
       - name: Build and push web
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: web/Dockerfile
+          context: wealthwise
+          file: wealthwise/web/Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/wealthwise-web:${{ steps.v.outputs.version || steps.v2.outputs.version }}
 

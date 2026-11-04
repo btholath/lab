@@ -1,15 +1,22 @@
-name: CI
+name: WealthWise CI
 
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
+    paths: ['wealthwise/**', '.github/workflows/wealthwise-ci.yml']
   pull_request:
+    paths: ['wealthwise/**', '.github/workflows/wealthwise-ci.yml']
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: wealthwise-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: wealthwise
 
 jobs:
   api:
@@ -23,15 +30,15 @@ jobs:
       - run: dotnet test api/WealthWise.slnx --no-build -c Release --collect:"XPlat Code Coverage" --results-directory TestResults
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: api-test-results, path: TestResults }
+        with: { name: api-test-results, path: wealthwise/TestResults }
 
   web:
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: web } }
+    defaults: { run: { working-directory: wealthwise/web } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+        with: { node-version: 22, cache: npm, cache-dependency-path: wealthwise/web/package-lock.json }
       - run: npm ci
       - run: npm run build
 
